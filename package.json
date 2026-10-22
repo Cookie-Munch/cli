@@ -1,0 +1,50 @@
+{
+  "name": "@cookiemunch/cli",
+  "version": "0.4.2",
+  "description": "cookiemunch — config as code, banner previews and connection tests from a terminal or CI, over the Cookie Munch Developer API",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "cookiemunch": "./dist/bin.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Cookie-Munch/cli.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@cookiemunch/sdk": "^0.4.1"
+  },
+  "homepage": "https://cookiemunch.net/docs",
+  "bugs": {
+    "url": "https://github.com/Cookie-Munch/cli/issues"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.0",
+    "tsup": "8.5.1",
+    "typescript": "5.9.3",
+    "vitest": "2.1.9"
+  }
+}
