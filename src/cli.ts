@@ -18,13 +18,14 @@
  *   cookiemunch health       [--site <cbid>] [--json]
  *   cookiemunch provision    <file> [--dry-run]
  *   cookiemunch partners     list|link|unlink --site <cbid> …
+ *   cookiemunch consent-sync status|rotate|remove|token --site <cbid> …
  *
  * Everything goes through the typed SDK (@cookiemunch/sdk) except where the SDK has no
  * method yet; those calls go through `rawRequest` with the same key and base URL. All I/O
  * is injected, so the whole CLI is testable with a mocked fetch.
  */
 
-import { createCookieMunch, CookieMunchApiError, type CookieMunchClient } from '@cookiemunch/sdk';
+import { createCookieMunch, CookieMunchApiError, mintConsentSyncToken, type CookieMunchClient } from '@cookiemunch/sdk';
 import { diffJson, formatChanges, isPlainObject, mergeLikeServer, withoutReadOnly, type Change, type Json } from './diff.js';
 import { rightsPageCommand } from './rights-page.js';
 import { healthCommand, keysCommand, partnersCommand, provisionCommand, siteCommand } from './integrations.js';
@@ -129,6 +130,16 @@ Usage:
                           [--aliases <a,b>] [--dry-run]
       Rename or move a site. The cbid and consent ledger stay; a domain move clears
       verification. --dry-run prints the diff and its effects without saving.
+  cookiemunch consent-sync status --site <cbid>
+      Whether hosted consent sync is set up (the secret's last four characters, when it was minted).
+  cookiemunch consent-sync rotate --site <cbid>
+      Mint the site's consent-sync signing secret, or replace it (the old one stops at once).
+      Prints the secret alone on stdout, so it can be piped into your secret store: it is shown once.
+  cookiemunch consent-sync remove --site <cbid> --yes
+      Remove it: hosted consent sync stops for every visitor.
+  cookiemunch consent-sync token --site <cbid> --subject <id> [--ttl <seconds>]
+      Sign a test token locally with COOKIEMUNCH_CONSENT_SYNC_SECRET (nothing is sent), e.g. to try
+      GET /api/v1/<cbid>/profile with curl.
   cookiemunch health [--site <cbid>] [--json]
       Every link the site's privacy wiring depends on, with a fix hint for each that
       fails. Exits 1 when a check fails (checks that could not run do not count).
@@ -227,7 +238,7 @@ function proposed(current: Record<string, unknown>, file: Record<string, unknown
 }
 
 /** This package's version, sent in the default User-Agent (a test pins it to package.json). */
-export const CLI_VERSION = '0.4.2';
+export const CLI_VERSION = '0.5.0';
 
 /** `COOKIEMUNCH_USER_AGENT`, else `cookiemunch-cli/<version>`. */
 function userAgent(io: CliIo): string {
@@ -361,6 +372,40 @@ async function previewCommand(p: Parsed, io: CliIo, client: CookieMunchClient): 
   io.stderr(`Valid until ${new Date(r.expiresAt).toISOString()}.\n`);
   if (p.flags.open === true && r.previewUrl) await io.openUrl(r.previewUrl);
   return 0;
+}
+
+async function consentSyncCommand(sub: string | undefined, p: Parsed, io: CliIo, client: CookieMunchClient): Promise<number> {
+  const cbid = requireSite(p, io);
+  if (sub === 'status') {
+    io.stdout(`${JSON.stringify(await client.consentSyncSecret.get(cbid), null, 2)}\n`);
+    return 0;
+  }
+  if (sub === 'rotate') {
+    const r = await client.consentSyncSecret.rotate(cbid);
+    io.stdout(`${r.secret}\n`);
+    io.stderr('This secret is shown once: store it on your server (never in a page). A previous secret stopped working.\n');
+    return 0;
+  }
+  if (sub === 'remove') {
+    if (p.flags.yes !== true) throw new UsageError('consent-sync remove stops hosted consent sync for every visitor: add --yes');
+    await client.consentSyncSecret.remove(cbid);
+    io.stderr(`Hosted consent sync is off for ${cbid}.\n`);
+    return 0;
+  }
+  if (sub === 'token') {
+    const secret = io.env.COOKIEMUNCH_CONSENT_SYNC_SECRET;
+    if (!secret) throw new UsageError('set COOKIEMUNCH_CONSENT_SYNC_SECRET to the site\'s consent-sync secret');
+    const subject = str(p.flags, 'subject');
+    if (!subject) throw new UsageError('--subject <id> is required');
+    const ttl = str(p.flags, 'ttl');
+    try {
+      io.stdout(`${mintConsentSyncToken({ secret, cbid, subject, ...(ttl !== undefined ? { ttlSeconds: Number(ttl) } : {}) })}\n`);
+    } catch (e) {
+      throw new UsageError((e as Error).message);
+    }
+    return 0;
+  }
+  throw new UsageError(`unknown consent-sync command: ${sub ?? '(none)'} — use status, rotate, remove or token`);
 }
 
 async function executorsCommand(
@@ -577,6 +622,7 @@ export async function run(argv: string[], io: CliIo): Promise<number> {
     if (cmd === 'config') return await configCommand(sub, p, io, client);
     if (cmd === 'preview') return await previewCommand(p, io, client);
     if (cmd === 'scan') return await scanCommand(p, io, client);
+    if (cmd === 'consent-sync') return await consentSyncCommand(sub, p, io, client);
     if (cmd === 'cookies') return await cookiesCommand(sub, p, io, client);
     if (cmd === 'executors') return await executorsCommand(sub, p, io, base, key, client);
     const helpers = {

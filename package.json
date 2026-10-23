@@ -1,6 +1,6 @@
 {
   "name": "@cookiemunch/cli",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "description": "cookiemunch — config as code, banner previews and connection tests from a terminal or CI, over the Cookie Munch Developer API",
   "license": "MIT",
   "type": "module",
@@ -35,7 +35,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@cookiemunch/sdk": "^0.4.1"
+    "@cookiemunch/sdk": "^0.5.0"
   },
   "homepage": "https://cookiemunch.net/docs",
   "bugs": {

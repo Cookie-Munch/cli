@@ -194,6 +194,51 @@ describe('preview', () => {
   });
 });
 
+describe('consent-sync', () => {
+  const view = { cbid: 'acme', configured: true, secretLast4: 'wxyz', createdAt: 1_760_000_000_000 };
+  const respond = (c: Call) =>
+    c.url.endsWith('/consent-sync-secret')
+      ? c.method === 'POST'
+        ? { status: 201, body: { ...view, secret: 'cmss_abc_wxyz' } }
+        : c.method === 'DELETE'
+          ? { status: 200, body: { cbid: 'acme', configured: false, secretLast4: null, createdAt: null } }
+          : { status: 200, body: view }
+      : undefined;
+
+  it('status prints whether it is set up, never a secret', async () => {
+    const h = harness({ respond });
+    expect(await run(['consent-sync', 'status', '--site', 'acme'], h.io)).toBe(0);
+    expect(h.calls).toEqual([expect.objectContaining({ method: 'GET', url: 'https://api.test/v1/sites/acme/consent-sync-secret' })]);
+    expect(JSON.parse(h.out())).toEqual(view);
+  });
+
+  it('rotate prints the secret alone on stdout (for a secret store) and says it is shown once', async () => {
+    const h = harness({ respond });
+    expect(await run(['consent-sync', 'rotate', '--site', 'acme'], h.io)).toBe(0);
+    expect(h.calls).toEqual([expect.objectContaining({ method: 'POST', url: 'https://api.test/v1/sites/acme/consent-sync-secret' })]);
+    expect(h.out()).toBe('cmss_abc_wxyz\n');
+    expect(h.err()).toMatch(/shown once/);
+  });
+
+  it('remove needs --yes, because sync stops for every visitor', async () => {
+    const h = harness({ respond });
+    expect(await run(['consent-sync', 'remove', '--site', 'acme'], h.io)).toBe(2);
+    expect(h.calls).toEqual([]);
+    expect(await run(['consent-sync', 'remove', '--site', 'acme', '--yes'], h.io)).toBe(0);
+    expect(h.calls).toEqual([expect.objectContaining({ method: 'DELETE', url: 'https://api.test/v1/sites/acme/consent-sync-secret' })]);
+  });
+
+  it('token signs a test token locally with COOKIEMUNCH_CONSENT_SYNC_SECRET and sends nothing', async () => {
+    const h = harness({ respond, env: { COOKIEMUNCH_CONSENT_SYNC_SECRET: 'cmss_local' } });
+    expect(await run(['consent-sync', 'token', '--site', 'acme', '--subject', 'user_42', '--ttl', '600'], h.io)).toBe(0);
+    expect(h.calls).toEqual([]);
+    const [, payload] = h.out().trim().split('.');
+    expect(JSON.parse(Buffer.from(payload!, 'base64url').toString())).toMatchObject({ c: 'acme', s: 'user_42' });
+    const none = harness({ respond });
+    expect(await run(['consent-sync', 'token', '--site', 'acme', '--subject', 'u'], none.io)).toBe(2);
+  });
+});
+
 describe('executors test', () => {
   it('posts the email and operation to the connection’s test endpoint and prints the result', async () => {
     const result = { ok: true, operation: 'export', upstream: [{ status: 200 }] };

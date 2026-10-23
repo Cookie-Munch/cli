@@ -2,6 +2,12 @@
 
 Every published release, newest first. Dates are the day the version was cut.
 
+## 0.5.0 (2026-10-23)
+
+- Added: `consent-sync status|rotate|remove --site <cbid>` manages the site's hosted consent-sync secret. `rotate` prints it once.
+- Added: `consent-sync token --site <cbid> --subject <id> [--ttl <seconds>]` signs a short-lived sync token for testing.
+- Changed: built on `@cookiemunch/sdk` 0.5.0.
+
 ## 0.4.2 (2026-10-22)
 
 - Changed: published from the public [Cookie-Munch/cli](https://github.com/Cookie-Munch/cli) repo with npm provenance, so `npm audit signatures` verifies where the package was built. No code changes.
