@@ -40,7 +40,7 @@ export interface ManifestSource {
   product?: string;
 }
 
-/** `atlas,chatly,https://x/.well-known/forgedeck-embed.json` → sources to fetch. */
+/** `atlas,chatly,https://x/.well-known/x-embed.json` → sources to fetch. */
 export function manifestSources(list: string, opts: { site?: string; apiBase: string }): { sources: ManifestSource[]; unknown: string[] } {
   const sources: ManifestSource[] = [];
   const unknown: string[] = [];
@@ -59,7 +59,9 @@ export function manifestSources(list: string, opts: { site?: string; apiBase: st
       sources.push({ label: `cookiemunch (site ${opts.site})`, urls: [`${opts.apiBase.replace(/\/$/, '')}/v1/embed?cbid=${encodeURIComponent(opts.site)}`], product: name });
       continue;
     }
-    sources.push({ label: name, urls: hosts.map((h) => `https://${h}/.well-known/forgedeck-embed.json`), product: name });
+    // Each product's manifest under its own name first; the suite-named path is the fallback.
+    const own = hosts.map((h) => `https://${h}/.well-known/${name}-embed.json`);
+    sources.push({ label: name, urls: [...own, ...hosts.map((h) => `https://${h}/.well-known/forgedeck-embed.json`)], product: name });
   }
   return { sources, unknown };
 }

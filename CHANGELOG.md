@@ -2,6 +2,10 @@
 
 Every published release, newest first. Dates are the day the version was cut.
 
+## 0.7.1 (2026-10-24)
+
+- Changed: `cookiemunch csp --merge <product>` reads each product's manifest under its own name first (`/.well-known/<product>-embed.json`), and the suite-named `forgedeck-embed.json` only as a fallback.
+
 ## 0.7.0 (2026-10-24)
 
 - Added: `cookiemunch sandbox [show] | create [--key-name <n>] | delete [--yes]`.

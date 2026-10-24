@@ -27,7 +27,7 @@ describe('cookiemunch csp', () => {
     const h = harness({
       env: { COOKIEMUNCH_API_KEY: '' },
       respond: (c) =>
-        c.url === 'https://cookiemunch.net/.well-known/forgedeck-embed.json' ? { status: 200, body: CM }
+        c.url === 'https://cookiemunch.net/.well-known/cookiemunch-embed.json' ? { status: 200, body: CM }
           : c.url === 'https://acmechat.example/.well-known/forgedeck-embed.json' ? { status: 200, body: VENDOR }
             : undefined,
     });
@@ -46,9 +46,14 @@ describe('cookiemunch csp', () => {
       respond: (c) => (c.url === 'https://api.cookiemunch.net/.well-known/forgedeck-embed.json' ? { status: 200, body: CM } : undefined),
     });
     expect(await run(['csp', '--merge', 'cookiemunch,atlas'], h.io)).toBe(1);
+    // Each product's own name first, on each host; the suite-named path last.
     expect(h.calls.map((c) => c.url)).toEqual([
+      'https://cookiemunch.net/.well-known/cookiemunch-embed.json',
+      'https://api.cookiemunch.net/.well-known/cookiemunch-embed.json',
       'https://cookiemunch.net/.well-known/forgedeck-embed.json',
       'https://api.cookiemunch.net/.well-known/forgedeck-embed.json',
+      'https://atlasauth.net/.well-known/atlas-embed.json',
+      'https://api.atlasauth.net/.well-known/atlas-embed.json',
       'https://atlasauth.net/.well-known/forgedeck-embed.json',
       'https://api.atlasauth.net/.well-known/forgedeck-embed.json',
     ]);

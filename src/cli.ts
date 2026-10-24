@@ -160,7 +160,7 @@ Usage:
       Remove every declaration that vendor's preset made.
   cookiemunch cookies import-manifest <url> --site <cbid> [--file <manifest.json>] [--dry-run]
       Declare any vendor's cookies and storage from its embed manifest
-      (/.well-known/forgedeck-embed.json), by URL or from a file. Remove it with
+      (/.well-known/<product>-embed.json), by URL or from a file. Remove it with
       cookies unpreset <product>.
   cookiemunch cookies suggestions --site <cbid>
       What to declare: the platforms detected on the site and each undeclared row.
@@ -210,7 +210,7 @@ Usage:
       API key (at most 1 hour); prints the key alone. Needs no API key.
   cookiemunch csp --merge <vendors|urls> [--framework next|express|nginx] [--site <cbid>]
       One Content-Security-Policy from several products' embed manifests
-      (/.well-known/forgedeck-embed.json): cookiemunch, atlas, chatly, forumulate,
+      (/.well-known/<product>-embed.json): cookiemunch, atlas, chatly, forumulate,
       referalli, or any manifest URL. --framework prints it for next.config.js,
       Express or nginx; without it, the header value. --site uses your site's own
       Cookie Munch manifest (its logo, fonts, sync endpoint). Needs no API key. Exits 1
@@ -340,7 +340,7 @@ function proposed(current: Record<string, unknown>, file: Record<string, unknown
 }
 
 /** This package's version, sent in the default User-Agent (a test pins it to package.json). */
-export const CLI_VERSION = '0.7.0';
+export const CLI_VERSION = '0.7.1';
 
 /** `COOKIEMUNCH_USER_AGENT`, else `cookiemunch-cli/<version>`. */
 function userAgent(io: CliIo): string {
@@ -760,7 +760,7 @@ async function cookiesCommand(sub: string | undefined, p: Parsed, io: CliIo, cli
     const cbid = requireSite(p, io);
     const src = p.positional[2];
     const file = str(p.flags, 'file');
-    if (!src && !file) throw new UsageError('a manifest URL (https://…/.well-known/forgedeck-embed.json) or --file <manifest.json> is required');
+    if (!src && !file) throw new UsageError('a manifest URL (https://…/.well-known/<product>-embed.json) or --file <manifest.json> is required');
     const input = file ? { manifest: JSON.parse(await io.readFile(file)) as never } : { url: src! };
     const r = await client.sites.importCookieManifest(cbid, input, dry);
     print(r);
