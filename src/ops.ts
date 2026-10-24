@@ -8,6 +8,7 @@
  *   cookiemunch doctor [--site <cbid>] [--org <id>]
  *   cookiemunch keys vend --scopes a,b --ttl 1h [--cbids x,y] [--name n]
  *   cookiemunch keys self | rotate-self
+ *   cookiemunch sandbox [show] | create [--key-name n] | delete [--yes]
  *   cookiemunch plan|apply <cookiemunch.json>
  *
  * Exit codes everywhere: 0 ok (or no changes), 1 a difference, a failure or a failed check, 2 a usage mistake.
@@ -264,6 +265,44 @@ export async function keysExtraCommand(sub: string, io: CliIo, client: CookieMun
     return 0;
   }
   throw h.usage('usage: cookiemunch keys report|vend|self|rotate-self');
+}
+
+// ---- sandbox (CMU-F10) ----
+
+/** `sandbox [show]`, `sandbox create [--key-name n]` (prints the test key alone), `sandbox delete [--yes]`. */
+export async function sandboxCommand(sub: string | undefined, io: CliIo, client: CookieMunchClient, h: OpsHelpers): Promise<number> {
+  if (sub === undefined || sub === 'show') {
+    const s = await client.sandbox.get();
+    if (json(h) || s) print(io, s);
+    else io.stderr('This organisation has no sandbox. Make one with: cookiemunch sandbox create\n');
+    return 0;
+  }
+  if (sub === 'create') {
+    const keyName = str(h, 'key-name');
+    const r = await client.sandbox.create(keyName ? { keyName } : {});
+    if (json(h)) print(io, r);
+    else {
+      io.stdout(`${r.key}\n`);
+      io.stderr(`${r.created ? 'Made' : 'Using'} sandbox ${r.sandbox.orgId} (${r.sandbox.name}). The key above is shown once: store it now.\n`);
+    }
+    return 0;
+  }
+  if (sub === 'delete') {
+    const s = await client.sandbox.get();
+    if (!s) { io.stderr('There is no sandbox.\n'); return 1; }
+    if (h.flag('yes') !== true) {
+      if (!io.confirm) throw h.usage('sandbox delete erases the sandbox and everything in it, and there is no terminal to confirm in. Pass --yes to delete without a prompt.');
+      if (!(await io.confirm(`Erase sandbox ${s.orgId} (${s.name}) and everything in it? This cannot be undone. [y/N] `))) {
+        io.stderr('Not deleted.\n');
+        return 1;
+      }
+    }
+    const r = await client.sandbox.delete();
+    if (json(h)) print(io, r);
+    else io.stderr(`Erased sandbox ${r.orgId ?? s.orgId}: ${Object.entries(r.counts).map(([k, v]) => `${v} ${k}`).join(', ')}.\n`);
+    return 0;
+  }
+  throw h.usage('usage: cookiemunch sandbox [show] | create [--key-name <n>] | delete [--yes]');
 }
 
 // ---- plan | apply <cookiemunch.json> (CMU-D12) ----

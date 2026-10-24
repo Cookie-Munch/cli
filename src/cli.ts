@@ -33,13 +33,13 @@
  * is injected, so the whole CLI is testable with a mocked fetch.
  */
 
-import { createCookieMunch, CookieMunchApiError, mintConsentSyncToken, runExecutorConformance, type CookieMunchClient } from '@cookiemunch/sdk';
+import { createCookieMunch, CookieMunchApiError, exchangeOperatorToken, mintConsentSyncToken, runExecutorConformance, type CookieMunchClient } from '@cookiemunch/sdk';
 import { diffJson, formatChanges, isPlainObject, mergeLikeServer, withoutReadOnly, type Change, type Json } from './diff.js';
 import { rightsPageCommand } from './rights-page.js';
 import { healthCommand, keysCommand, partnersCommand, provisionCommand, siteCommand } from './integrations.js';
 import { countBySeverity, formatDesignWarnings, summaryLine } from './design-warnings.js';
 import { cspCommand } from './csp.js';
-import { bundleCommand, cookiesFileCommand, doctorCommand, dsarTestCommand, executorsFileCommand, keysExtraCommand, versionCommand, type OpsHelpers } from './ops.js';
+import { bundleCommand, cookiesFileCommand, doctorCommand, dsarTestCommand, executorsFileCommand, keysExtraCommand, sandboxCommand, versionCommand, type OpsHelpers } from './ops.js';
 
 export const DEFAULT_BASE_URL = 'https://api.cookiemunch.net';
 
@@ -205,6 +205,9 @@ Usage:
       Grant a partner platform the site's consent events (no secret is created), list
       the grants, or revoke one. Any partner this deployment knows (forumulate, atlas, chatly,
       referalli, or one registered for it).
+  cookiemunch token exchange --subject-token-env NAME --scope <a,b> --resource org:<id>|site:<cbid> [--expires-in <s>]
+      Swap your identity provider's token (read from the variable NAME) for a short-lived, scoped
+      API key (at most 1 hour); prints the key alone. Needs no API key.
   cookiemunch csp --merge <vendors|urls> [--framework next|express|nginx] [--site <cbid>]
       One Content-Security-Policy from several products' embed manifests
       (/.well-known/forgedeck-embed.json): cookiemunch, atlas, chatly, forumulate,
@@ -230,6 +233,11 @@ Usage:
       Needs keys:write (or a full-access key).
   cookiemunch keys self | rotate-self
       This key's own prefix, scopes and expiry; or rotate it (the new key is printed once).
+  cookiemunch sandbox [show] | create [--key-name <n>] | delete [--yes]
+      The organisation's sandbox: a separate test organisation with the same people and plan
+      features, never billed; its keys are test keys and its rights requests are all tests.
+      create makes it (or reuses it) and prints a new key for it alone; delete erases it and
+      everything in it, after asking. create and delete need a full-access key or orgs:create.
   cookiemunch plan [cookiemunch.json] [--exit-code] [--json]
   cookiemunch apply [cookiemunch.json] [--secret-env NAME] [--secrets-out <file>]
       One file for a site: {site, config, cookies, presets, executors, webhooks, rightsPage,
@@ -332,7 +340,7 @@ function proposed(current: Record<string, unknown>, file: Record<string, unknown
 }
 
 /** This package's version, sent in the default User-Agent (a test pins it to package.json). */
-export const CLI_VERSION = '0.6.0';
+export const CLI_VERSION = '0.7.0';
 
 /** `COOKIEMUNCH_USER_AGENT`, else `cookiemunch-cli/<version>`. */
 function userAgent(io: CliIo): string {
@@ -832,6 +840,31 @@ export async function run(argv: string[], io: CliIo): Promise<number> {
     }
   }
   const base = io.env.COOKIEMUNCH_BASE_URL || DEFAULT_BASE_URL;
+  // Token exchange (CMU-X33) needs no API key: it is how you get one. The subject token is read from the
+  // environment variable --subject-token-env names, never from the command line (shell history, ps).
+  if (cmd === 'token' && p.positional[1] === 'exchange') {
+    const envName = str(p.flags, 'subject-token-env');
+    const subjectToken = envName ? io.env[envName] : undefined;
+    const scope = (str(p.flags, 'scope') ?? '').split(/[,\s]+/).filter(Boolean);
+    const resource = str(p.flags, 'resource');
+    const exp = str(p.flags, 'expires-in');
+    if (!envName || !subjectToken) { io.stderr(`token exchange needs --subject-token-env NAME, naming a variable that holds your identity provider's token\n`); return 2; }
+    if (!scope.length) { io.stderr('token exchange needs --scope a,b (an exchanged key is never full access)\n'); return 2; }
+    if (!resource || !/^(org|site):.+/.test(resource)) { io.stderr('token exchange needs --resource org:<id> or site:<cbid>\n'); return 2; }
+    if (exp !== undefined && !/^\d+$/.test(exp)) { io.stderr('--expires-in must be a number of seconds\n'); return 2; }
+    try {
+      const r = await exchangeOperatorToken({
+        subjectToken, scope, resource: resource as `org:${string}`, baseUrl: base, fetch: io.fetch,
+        ...(exp !== undefined ? { expiresIn: Number(exp) } : {}),
+      });
+      // The key alone on stdout, so `export COOKIEMUNCH_API_KEY=$(cookiemunch token exchange …)` works.
+      io.stdout(p.flags.json === true ? `${JSON.stringify(r, null, 2)}\n` : `${r.accessToken}\n`);
+      return 0;
+    } catch (e) {
+      io.stderr(`${(e as Error).message}\n`);
+      return 1;
+    }
+  }
   // Every embed manifest is public: csp needs no key.
   if (cmd === 'csp') {
     try {
@@ -877,6 +910,7 @@ export async function run(argv: string[], io: CliIo): Promise<number> {
     if (cmd === 'dsar' && sub === 'test') return await dsarTestCommand(io, client, ops);
     if (cmd === 'doctor') return await doctorCommand(io, client, ops, CLI_VERSION);
     if (cmd === 'keys' && sub && sub !== 'report') return await keysExtraCommand(sub, io, client, ops);
+    if (cmd === 'sandbox') return await sandboxCommand(sub, io, client, ops);
     if (cmd === 'plan' || cmd === 'apply') return await bundleCommand(cmd, io, client, ops);
     if (cmd === 'config') return await configCommand(sub, p, io, client);
     if (cmd === 'preview') return await previewCommand(p, io, client);

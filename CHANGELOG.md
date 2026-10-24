@@ -2,6 +2,11 @@
 
 Every published release, newest first. Dates are the day the version was cut.
 
+## 0.7.0 (2026-10-24)
+
+- Added: `cookiemunch sandbox [show] | create [--key-name <n>] | delete [--yes]`.
+- Added: `cookiemunch token exchange --subject-token-env NAME --scope a,b --resource org:<id>|site:<cbid>` — a key for at most an hour from your identity provider's sign-in, no API key needed.
+
 ## 0.6.0 (2026-10-24)
 
 - Added: `cookiemunch executors conformance <baseUrl> --secret-env NAME` — checks any system against the open cm-standard-v2 executor contract, no Cookie Munch key needed with `--canary-email`; `--connection <id>` runs it from Cookie Munch.
