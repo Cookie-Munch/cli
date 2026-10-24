@@ -19,7 +19,8 @@ interface Helpers {
 const out = (io: CliIo, v: unknown) => io.stdout(`${JSON.stringify(v, null, 2)}\n`);
 
 /** `cookiemunch site update --site <cbid> [--domain d] [--name n | --clear-name] [--aliases a,b] [--dry-run]` */
-export async function siteCommand(sub: string | undefined, io: CliIo, client: CookieMunchClient, h: Helpers): Promise<number> {
+export async function siteCommand(sub: string | undefined, io: CliIo, client: CookieMunchClient, h: Helpers, file?: string): Promise<number> {
+  if (sub === 'brand') return brandCommand(io, client, h, file);
   if (sub !== 'update') throw h.usage('usage: cookiemunch site update --site <cbid> [--domain <host>] [--name <name>] [--aliases a,b] [--dry-run]');
   const cbid = h.requireSite();
   const domain = h.flag('domain');
@@ -38,24 +39,74 @@ export async function siteCommand(sub: string | undefined, io: CliIo, client: Co
   return 0;
 }
 
+/**
+ * `cookiemunch site brand --site <cbid> (--url <https URL> | <brand.json>) [--dry-run]` imports a brand.json into the
+ * banner theme (CMU-X44); with neither, it prints the read-back of the last import.
+ */
+async function brandCommand(io: CliIo, client: CookieMunchClient, h: Helpers, file: string | undefined): Promise<number> {
+  const cbid = h.requireSite();
+  const url = h.flag('url');
+  const r = typeof url === 'string'
+    ? await client.sites.setBrand(cbid, { url }, { dryRun: h.flag('dry-run') === true })
+    : file
+      ? await client.sites.setBrand(cbid, (await h.readJson(file)) as Record<string, unknown>, { dryRun: h.flag('dry-run') === true })
+      : await client.sites.getBrand(cbid);
+  out(io, r);
+  for (const w of r.warnings) io.stderr(`warning (${w.role}): ${w.message}\n`);
+  for (const w of r.configWarnings ?? []) io.stderr(`warning (${w.field}): ${w.reason}\n`);
+  return 0;
+}
+
 /** `cookiemunch health [--site <cbid>]` — exits 1 when a check fails, so CI can gate on it. */
 export async function healthCommand(io: CliIo, client: CookieMunchClient, h: Helpers): Promise<number> {
+  // --fail-on error | warning (default) | never: which failing severity makes the exit code 1, for CI.
+  const failOn = h.flag('fail-on') ?? 'warning';
+  if (failOn !== 'error' && failOn !== 'warning' && failOn !== 'never') throw h.usage('--fail-on must be error, warning or never');
   const r = await client.integrationHealth(h.site());
   if (h.flag('json') === true) out(io, r);
   else {
     for (const c of r.checks) {
-      const mark = c.ok === true ? 'ok  ' : c.ok === false ? (c.severity === 'error' ? 'FAIL' : 'WARN') : '--  ';
-      io.stdout(`${mark} ${c.check} — ${c.subject}${c.detail ? `: ${c.detail}` : ''}\n`);
-      if (c.ok === false && c.fixHint) io.stdout(`     fix: ${c.fixHint}\n`);
+      const mark = c.waived ? 'WAIV' : c.ok === true ? 'ok  ' : c.ok === false ? (c.severity === 'error' ? 'FAIL' : 'WARN') : '--  ';
+      const net = c.hop ? ` (${c.hop}${c.status !== undefined ? ` ${c.status}` : ''}${c.elapsedMs !== undefined ? `, ${c.elapsedMs} ms` : ''})` : '';
+      io.stdout(`${mark} ${c.check} — ${c.subject}${c.detail ? `: ${c.detail}` : ''}${net}${c.waived ? ` — waived: ${c.waived.reason}` : ''}\n`);
+      const fix = c.fix ?? c.fixHint;
+      if (c.ok === false && fix) io.stdout(`     fix: ${fix}\n`);
     }
-    io.stdout(`${r.counts.error} error(s), ${r.counts.warning} warning(s), ${r.counts.notChecked} not checked\n`);
+    io.stdout(`${r.counts.error} error(s), ${r.counts.warning} warning(s), ${r.counts.notChecked} not checked${r.counts.waived ? `, ${r.counts.waived} waived` : ''}\n`);
   }
-  return r.ok ? 0 : 1;
+  if (failOn === 'never') return 0;
+  const failing = r.checks.filter((c) => c.ok === false && (c.severity === 'error' || (failOn === 'warning' && c.severity === 'warning')));
+  return failing.length ? 1 : 0;
 }
 
 /** `cookiemunch provision <file> [--dry-run]` — the file has no secrets; the environment supplies them. */
 export async function provisionCommand(file: string | undefined, io: CliIo, client: CookieMunchClient, h: Helpers): Promise<number> {
   const input = (await h.readJson(file)) as unknown as ProvisionRequest;
+  // v2 (a forgedeck body): `self.keyEnv` names the env var holding the product's own API key (never in the file).
+  const v2 = input as unknown as Record<string, any>;
+  if (v2.forgedeck !== undefined || (v2.site && typeof v2.site === 'object')) {
+    const body: Record<string, any> = { ...v2 };
+    if (body.self) {
+      const { keyEnv, ...self } = body.self as Record<string, unknown>;
+      const secret = typeof keyEnv === 'string' ? io.env[keyEnv] : undefined;
+      if (!secret) throw h.usage(`self needs its key: set self.keyEnv in the file and export that variable`);
+      body.self = { ...self, secret };
+    }
+    if (body.atlas && io.env.COOKIEMUNCH_ATLAS_SECRET_KEY) body.atlas = { ...body.atlas, secretKey: io.env.COOKIEMUNCH_ATLAS_SECRET_KEY };
+    if (body.forumulate && io.env.COOKIEMUNCH_FORUMULATE_TOKEN) body.forumulate = { ...body.forumulate, token: io.env.COOKIEMUNCH_FORUMULATE_TOKEN };
+    const fromStep = h.flag('from-step');
+    const r = await client.provision(body as never, { dryRun: h.flag('dry-run') === true, ...(typeof fromStep === 'string' ? { fromStep } : {}) }) as unknown as { steps: Array<{ id?: string; step: string; status: string; detail?: string; waitingOn?: unknown }>; dryRun: boolean; summary: Record<string, number> };
+    if (h.flag('json') === true) out(io, r);
+    else {
+      for (const s of r.steps) {
+        const w = s.waitingOn as { platform?: string; items?: string[] } | string | undefined;
+        const waiting = typeof w === 'string' ? w : w ? `${w.platform}: ${(w.items ?? []).join(', ')}` : '';
+        io.stdout(`${s.status.padEnd(12)} ${s.id ?? s.step}${s.detail ? ` — ${s.detail}` : ''}${waiting ? ` (waiting on ${waiting})` : ''}\n`);
+      }
+      io.stdout(`${r.dryRun ? 'dry run: ' : ''}${r.summary.changed} changed, ${r.summary.unchanged} unchanged, ${r.summary.waiting} waiting, ${r.summary.failed} failed\n`);
+    }
+    return r.summary.failed ? 1 : 0;
+  }
   const withSecrets: ProvisionRequest = { ...input };
   if (input.atlas || io.env.COOKIEMUNCH_ATLAS_SECRET_KEY) {
     const secretKey = io.env.COOKIEMUNCH_ATLAS_SECRET_KEY ?? input.atlas?.secretKey;
@@ -68,6 +119,7 @@ export async function provisionCommand(file: string | undefined, io: CliIo, clie
     withSecrets.forumulate = { ...input.forumulate, token };
   }
   const r = await client.provision(withSecrets, { dryRun: h.flag('dry-run') === true });
+  if (h.flag('json') === true) { out(io, r); return r.summary.failed ? 1 : 0; }
   for (const s of r.steps) {
     io.stdout(`${s.status.padEnd(12)} ${s.step}${s.detail ? ` — ${s.detail}` : ''}${s.waitingOn ? ` (waiting on ${s.waitingOn})` : ''}\n`);
   }
@@ -82,7 +134,7 @@ export async function partnersCommand(sub: string | undefined, rest: string[], i
   if (sub === 'link') {
     const partner = h.flag('partner');
     const externalId = h.flag('external-id');
-    if (partner !== 'forumulate' && partner !== 'atlas') throw h.usage('--partner forumulate|atlas is required');
+    if (typeof partner !== 'string' || !/^[a-z][a-z0-9_]{1,39}$/.test(partner)) throw h.usage('--partner <id> is required: forumulate, atlas, chatly, referalli, or one registered on the deployment');
     if (typeof externalId !== 'string') throw h.usage('--external-id <the partner’s account id> is required');
     const label = h.flag('label');
     const input: PartnerLinkCreate = { partner, externalId, ...(typeof label === 'string' ? { label } : {}) };
@@ -119,6 +171,9 @@ export async function keysCommand(sub: string | undefined, io: CliIo, client: Co
   section(`Unused for ${r.unusedDays}+ days`, r.unused);
   section('Broad access', r.broad);
   section(`Expiring within ${r.expiringDays} days`, r.expiringSoon);
+  const revoked = r.revoked ?? [];
+  io.stdout(`Revoked: ${revoked.length}\n`);
+  for (const k of revoked) io.stdout(`  ${k.prefix}${k.name ? ` (${k.name})` : ''} — ${k.reason} ${new Date(k.revokedAt).toISOString()} by ${k.revokedBy}; last used ${k.lastUsedAt ? new Date(k.lastUsedAt).toISOString() : 'never'}\n`);
   io.stdout(`${r.total} key(s), ${r.noExpiry} with no expiry\n`);
   return 0;
 }

@@ -65,8 +65,9 @@ export async function rightsPageCommand(
       return 1;
     }
     const changes = diffJson(current, proposed);
+    if (p.flags.json === true && (sub === 'diff' || !changes.length)) io.stdout(`${JSON.stringify({ cbid, changes }, null, 2)}\n`);
     if (!changes.length) { io.stderr(`No changes: ${cbid}'s rights page draft already matches.\n`); return 0; }
-    io.stdout(`${formatChanges(changes)}\n`);
+    if (p.flags.json !== true) io.stdout(`${formatChanges(changes)}\n`);
     if (sub === 'diff') {
       io.stderr(`${changes.length} change${changes.length === 1 ? '' : 's'} (nothing saved). Apply with: cookiemunch rights-page push --site ${cbid} ${p.positional[2]}\n`);
       return p.flags['exit-code'] === true ? 1 : 0;

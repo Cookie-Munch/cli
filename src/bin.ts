@@ -44,7 +44,7 @@ run(process.argv.slice(2), {
   stdout: (t) => process.stdout.write(t),
   stderr: (t) => process.stderr.write(t),
   readFile: (p) => readFile(p, 'utf8'),
-  writeFile: (p, d) => writeFile(p, d, 'utf8'),
+  writeFile: (p, d, mode) => writeFile(p, d, { encoding: 'utf8', ...(mode !== undefined ? { mode } : {}) }),
   openUrl,
   ...(process.stdin.isTTY && process.stderr.isTTY ? { confirm } : {}),
 }).then(

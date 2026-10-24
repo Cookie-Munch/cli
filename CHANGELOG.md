@@ -2,6 +2,19 @@
 
 Every published release, newest first. Dates are the day the version was cut.
 
+## 0.6.0 (2026-10-24)
+
+- Added: `cookiemunch executors conformance <baseUrl> --secret-env NAME` — checks any system against the open cm-standard-v2 executor contract, no Cookie Munch key needed with `--canary-email`; `--connection <id>` runs it from Cookie Munch.
+- Added: `cookiemunch executors roll-completion-secret <id>`.
+- Added: `--version` and `version [--json]` (`{ cli, api }`).
+- Added: `cookies diff|push <file>`, `executors pull|diff|push <file> [--secret-env NAME]` (files never carry a secret), `dsar test [--types …] [--with-cbid] [--without-cbid] [--cleanup]` (deletes only what it filed), `doctor`.
+- Added: `plan` / `apply` over one `cookiemunch.json` bundle, and the `plan-action` GitHub Action that comments the plan on a pull request.
+- Added: `keys vend --scopes … --ttl 1h`, `keys self`, `keys rotate-self`; `keys report` lists revoked keys.
+- Added: `--json` on every command; `--idempotency-key`; `COOKIEMUNCH_SECRET_RECIPIENT` for sealed secrets; `provision` takes a forgedeck (v2) body and `--from-step`.
+- Changed: `partners link --partner` takes any partner the deployment knows.
+- Added: `cookiemunch csp --merge <vendors|urls> [--framework next|express|nginx]` (needs no key), `cookies suggestions` / `declare-suggestions` / `import-manifest`, `site brand`, `health --fail-on`.
+- Changed: built on `@cookiemunch/sdk` 0.6.0.
+
 ## 0.5.0 (2026-10-23)
 
 - Added: `consent-sync status|rotate|remove --site <cbid>` manages the site's hosted consent-sync secret. `rotate` prints it once.

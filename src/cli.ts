@@ -10,26 +10,36 @@
  *   cookiemunch executors webhook-test <id> --headers-file <json> --body-file <file>
  *   cookiemunch executors deliveries <id>
  *   cookiemunch executors presets
- *   cookiemunch executors upgrade-preset <id> [--preset <name>] [--version <n>] [--org-id <id>] [--atlas-id-app-id <id>] [--dry-run]
+ *   cookiemunch executors conformance <baseUrl> --secret-env <NAME> [--canary-email <addr>] [--prefix /privacy] [--json]
+ *   cookiemunch executors conformance --connection <id> [--json]
+ *   cookiemunch executors roll-completion-secret <id>
+ *   cookiemunch executors upgrade-preset <id> [--preset <name>] [--version <n>] [--org-id <id>] [--atlas-id-app-id <id>]
+ *                      [--revoke-atlas-id-grant] [--accept-preset <path> …] [--dry-run]
+ *   cookiemunch executors recheck <id>
+ *   cookiemunch executors health <id> [--limit <n>]
  *   cookiemunch rights-page pull|diff|push|publish --site <cbid> [<file>] [--base <updatedAt>] [--yes]
  *   cookiemunch scan         --site <cbid> [--wait] [--timeout <seconds>]
  *   cookiemunch cookies presets|preset|unpreset|delete-observed|purge-observed --site <cbid> …
  *   cookiemunch site update  --site <cbid> [--domain <host>] [--name <name>] [--aliases a,b] [--dry-run]
- *   cookiemunch health       [--site <cbid>] [--json]
+ *   cookiemunch site brand   --site <cbid> [--url <https URL> | <brand.json>] [--dry-run]
+ *   cookiemunch health       [--site <cbid>] [--json] [--fail-on error|warning|never]
  *   cookiemunch provision    <file> [--dry-run]
  *   cookiemunch partners     list|link|unlink --site <cbid> …
  *   cookiemunch consent-sync status|rotate|remove|token --site <cbid> …
+ *   cookiemunch csp          --merge <vendors|urls> [--framework next|express|nginx] [--site <cbid>]
  *
  * Everything goes through the typed SDK (@cookiemunch/sdk) except where the SDK has no
  * method yet; those calls go through `rawRequest` with the same key and base URL. All I/O
  * is injected, so the whole CLI is testable with a mocked fetch.
  */
 
-import { createCookieMunch, CookieMunchApiError, mintConsentSyncToken, type CookieMunchClient } from '@cookiemunch/sdk';
+import { createCookieMunch, CookieMunchApiError, mintConsentSyncToken, runExecutorConformance, type CookieMunchClient } from '@cookiemunch/sdk';
 import { diffJson, formatChanges, isPlainObject, mergeLikeServer, withoutReadOnly, type Change, type Json } from './diff.js';
 import { rightsPageCommand } from './rights-page.js';
 import { healthCommand, keysCommand, partnersCommand, provisionCommand, siteCommand } from './integrations.js';
 import { countBySeverity, formatDesignWarnings, summaryLine } from './design-warnings.js';
+import { cspCommand } from './csp.js';
+import { bundleCommand, cookiesFileCommand, doctorCommand, dsarTestCommand, executorsFileCommand, keysExtraCommand, versionCommand, type OpsHelpers } from './ops.js';
 
 export const DEFAULT_BASE_URL = 'https://api.cookiemunch.net';
 
@@ -39,7 +49,8 @@ export interface CliIo {
   stdout: (text: string) => void;
   stderr: (text: string) => void;
   readFile: (path: string) => Promise<string>;
-  writeFile: (path: string, data: string) => Promise<void>;
+  /** `mode` is the file mode for a new file (0o600 for anything holding a secret). */
+  writeFile: (path: string, data: string, mode?: number) => Promise<void>;
   /** Open a URL in the user's browser. */
   openUrl: (url: string) => Promise<void>;
   /**
@@ -87,11 +98,32 @@ Usage:
   cookiemunch executors presets
       The versioned presets, which are usable now and which wait on another
       platform, and the organisation's canary address.
+  cookiemunch executors conformance <baseUrl> --secret-env <NAME> [--canary-email <addr>]
+                      [--prefix /privacy] [--json]
+      Check any system against the open cm-standard-v2 executor contract, rule by
+      rule, using only the canary subject. The credential is read from the
+      environment variable NAME, never from the command line. Without
+      --canary-email the organisation's canary address is fetched (needs
+      COOKIEMUNCH_API_KEY); with it, no Cookie Munch key is needed at all.
+      Exits 1 when any rule fails.
+  cookiemunch executors conformance --connection <id> [--json]
+      The same suite, run by Cookie Munch against a connected system.
+  cookiemunch executors roll-completion-secret <id>
+      A new completion secret for that connection, printed once; the old one keeps
+      verifying for 24 hours.
   cookiemunch executors upgrade-preset <id> [--preset <name>] [--version <n>]
-                      [--org-id <id>] [--atlas-id-app-id <id>] [--dry-run]
+                      [--org-id <id>] [--atlas-id-app-id <id>] [--revoke-atlas-id-grant]
+                      [--accept-preset <path> …] [--dry-run]
       Rebuild a connection from its preset's latest version (or --version), keeping
       its id and credentials; --preset adopts one on a hand-written connection.
-      Prints the diff; --dry-run changes nothing.
+      Your hand edits are kept (the diff marks them kept or conflict); --accept-preset
+      (repeatable) takes the preset's value for that path. Prints the diff; --dry-run
+      changes nothing. A pinned connection is refused.
+  cookiemunch executors recheck <id>
+      Re-check a connection now (a canary test that records its health): the hook to
+      run after deploying that system's rights API. Exits 1 when it is not ok.
+  cookiemunch executors health <id> [--limit <n>]
+      The connection's last health checks, newest first (up to 50).
   cookiemunch rights-page pull    --site <cbid> [--out <file>]
       Write the site's rights page draft as JSON, and print its updatedAt for --base.
   cookiemunch rights-page diff    --site <cbid> <file> [--exit-code]
@@ -112,15 +144,28 @@ Usage:
       waited on rather than started twice.
 
   cookiemunch cookies presets --site <cbid>
-      The declaration presets (atlas, forumulate, chatly, cookiemunch, referally): what each takes,
+      The declaration presets (atlas, forumulate, chatly, cookiemunch, referalli, firstpromoter,
+      partnerstack, tapfiliate, impact; referally is the deprecated old name of referalli): what each takes,
       what it declared on this site, and whether the vendor's own manifest exists yet.
   cookiemunch cookies preset <vendor> --site <cbid> [--param k=v …] [--dry-run]
       Declare what that platform writes (cookies and browser storage), marked as
       declared by it; run again to re-sync. Atlas: --param frontendApiHost=auth.example.com
       [--param crossSubdomainCookies=false]. Chatly: --param publicId=ch_web_… .
-      Referally: [--param cookieDomain=.example.com] [--param cookieDays=60] [--param category=…].
+      Referral and affiliate presets (referalli, firstpromoter, partnerstack, tapfiliate, impact):
+      [--param cookieDomain=.example.com] [--param cookieDays=60] [--param category=…];
+      referalli [--param legacyName=false], impact [--param campaignId=…]. A row filed under a
+      disabled category prints a warning and a suggestedConfigPatch. Any other vendor is
+      declared with the API (PUT /v1/sites/{cbid}/cookies).
   cookiemunch cookies unpreset <vendor> --site <cbid> [--dry-run]
       Remove every declaration that vendor's preset made.
+  cookiemunch cookies import-manifest <url> --site <cbid> [--file <manifest.json>] [--dry-run]
+      Declare any vendor's cookies and storage from its embed manifest
+      (/.well-known/forgedeck-embed.json), by URL or from a file. Remove it with
+      cookies unpreset <product>.
+  cookiemunch cookies suggestions --site <cbid>
+      What to declare: the platforms detected on the site and each undeclared row.
+  cookiemunch cookies declare-suggestions --site <cbid> [--names a,b] [--dry-run]
+      Declare them: detected vendors' presets, then every other suggestion with a purpose.
   cookiemunch cookies delete-observed <name> --site <cbid> [--dry-run]
       Remove every stored row of that name (a name the site never sets). A declaration stays.
   cookiemunch cookies purge-observed --site <cbid> --since <time> [--until <time>] [--dry-run]
@@ -130,6 +175,9 @@ Usage:
                           [--aliases <a,b>] [--dry-run]
       Rename or move a site. The cbid and consent ledger stay; a domain move clears
       verification. --dry-run prints the diff and its effects without saving.
+  cookiemunch site brand --site <cbid> [--url <https URL> | <brand.json>] [--dry-run]
+      Import a brand.json into the banner theme (the rights page uses it too). Values the
+      site set itself are kept. With neither --url nor a file, prints the last import.
   cookiemunch consent-sync status --site <cbid>
       Whether hosted consent sync is set up (the secret's last four characters, when it was minted).
   cookiemunch consent-sync rotate --site <cbid>
@@ -140,9 +188,10 @@ Usage:
   cookiemunch consent-sync token --site <cbid> --subject <id> [--ttl <seconds>]
       Sign a test token locally with COOKIEMUNCH_CONSENT_SYNC_SECRET (nothing is sent), e.g. to try
       GET /api/v1/<cbid>/profile with curl.
-  cookiemunch health [--site <cbid>] [--json]
+  cookiemunch health [--site <cbid>] [--json] [--fail-on error|warning|never]
       Every link the site's privacy wiring depends on, with a fix hint for each that
-      fails. Exits 1 when a check fails (checks that could not run do not count).
+      fails. Exits 1 when a check fails (checks that could not run, or are waived, do not count).
+      --fail-on error ignores warnings; --fail-on never always exits 0.
   cookiemunch provision <file> [--dry-run]
       Wire a product's privacy in one call (site, connections, Atlas, Forumulate) from
       a JSON file without secrets: the Atlas key and Forumulate token come from
@@ -151,17 +200,62 @@ Usage:
   cookiemunch keys report [--unused-days <n>] [--expiring-days <n>] [--json]
       Key hygiene: keys unused for n days (default 90), keys with broad access, and
       keys expiring within n days (default 14). Needs a full-access key.
-  cookiemunch partners list|link|unlink --site <cbid> [--partner forumulate|atlas]
+  cookiemunch partners list|link|unlink --site <cbid> [--partner <id>]
                        [--external-id <id>] [--label <text>] [<linkId>]
       Grant a partner platform the site's consent events (no secret is created), list
-      the grants, or revoke one.
+      the grants, or revoke one. Any partner this deployment knows (forumulate, atlas, chatly,
+      referalli, or one registered for it).
+  cookiemunch csp --merge <vendors|urls> [--framework next|express|nginx] [--site <cbid>]
+      One Content-Security-Policy from several products' embed manifests
+      (/.well-known/forgedeck-embed.json): cookiemunch, atlas, chatly, forumulate,
+      referalli, or any manifest URL. --framework prints it for next.config.js,
+      Express or nginx; without it, the header value. --site uses your site's own
+      Cookie Munch manifest (its logo, fonts, sync endpoint). Needs no API key. Exits 1
+      when a named product has not published a manifest (the rest are still merged).
+  cookiemunch cookies diff|push <file> --site <cbid> [--replace] [--exit-code]
+      Declarations as a file ({"cookies": [...]}), through the server's dry run. push applies
+      only when something differs; --replace also removes declarations the file leaves out.
+  cookiemunch executors pull [<file>] | diff <file> | push <file> [--secret-env NAME]
+      Connected systems as a file. The file never carries a secret: a new connection's API key
+      comes from the environment variable --secret-env names.
+  cookiemunch dsar test [--types access,deletion] [--with-cbid --site <cbid>] [--without-cbid]
+                        [--email <addr>] [--cleanup]
+      File TEST rights requests and read each back. --cleanup deletes exactly the ones this run
+      filed (by id; it never deletes by listing).
+  cookiemunch doctor [--site <cbid>] [--org <id>]
+      The key (and whose org it is, against --org or COOKIEMUNCH_ORG), its expiry, the CLI
+      version against the latest, and integration health. Exits 1 when a check fails.
+  cookiemunch keys vend --scopes <a,b> --ttl <1h|30m|seconds> [--cbids <x,y>] [--name <n>]
+      A short-lived key (at most 12 h) within this key's own scopes; prints the key alone.
+      Needs keys:write (or a full-access key).
+  cookiemunch keys self | rotate-self
+      This key's own prefix, scopes and expiry; or rotate it (the new key is printed once).
+  cookiemunch plan [cookiemunch.json] [--exit-code] [--json]
+  cookiemunch apply [cookiemunch.json] [--secret-env NAME] [--secrets-out <file>]
+      One file for a site: {site, config, cookies, presets, executors, webhooks, rightsPage,
+      partners}, no secrets. plan prints the server's dry run of every part ("No changes" when
+      it matches); apply applies them in dependency order and logs each. New webhook secrets
+      go to --secrets-out (mode 0600).
+  cookiemunch --version | version [--json]
+      The CLI version; --json adds the API version the server documents.
+
+Every command takes --json for machine-readable output.
+
+Exit codes:
+  0  ok, or nothing to change
+  1  a difference (with --exit-code), a failure, or a failed check
+  2  a usage mistake
 
 Environment:
-  COOKIEMUNCH_API_KEY   an API key (fck_…). Required.
+  COOKIEMUNCH_API_KEY   an API key (cookiemunch_live_…, or a legacy fck_…). Required.
   COOKIEMUNCH_BASE_URL  the API origin. Default ${DEFAULT_BASE_URL}.
   COOKIEMUNCH_SITE      default for --site.
   COOKIEMUNCH_STRICT_FIELDS=1  send Prefer: strict-unknown-fields on writes: a field the
                         API does not know is refused (400 unknown_field), not ignored.
+  COOKIEMUNCH_SECRET_RECIPIENT=x25519:<base64>  answers carry once-shown secrets sealed to
+                        this key (sealed_secret), never in plaintext.
+  COOKIEMUNCH_ORG       the org id doctor checks the key against.
+  --idempotency-key <k> send Idempotency-Key on writes: a retry replays the first answer.
 `;
 
 /** A usage mistake: exit code 2. */
@@ -172,7 +266,7 @@ interface Parsed {
   flags: Record<string, string | true>;
 }
 
-const BOOLEAN_FLAGS = new Set(['replace', 'exit-code', 'open', 'help', 'json', 'yes', 'strict', 'wait', 'canary', 'dry-run', 'clear-name']);
+const BOOLEAN_FLAGS = new Set(['replace', 'exit-code', 'open', 'help', 'json', 'yes', 'strict', 'wait', 'canary', 'dry-run', 'clear-name', 'revoke-atlas-id-grant', 'with-cbid', 'without-cbid', 'cleanup']);
 
 export function parseArgs(argv: string[]): Parsed {
   const positional: string[] = [];
@@ -194,7 +288,7 @@ export function parseArgs(argv: string[]): Parsed {
         i++;
       }
       // --param repeats (k=v each); kept newline-joined so the rest of the parser stays simple.
-      if (name === 'param' && typeof value === 'string' && typeof flags.param === 'string') flags.param = `${flags.param}\n${value}`;
+      if ((name === 'param' || name === 'accept-preset') && typeof value === 'string' && typeof flags[name] === 'string') flags[name] = `${flags[name]}\n${value}`;
       else flags[name] = value;
     } else {
       positional.push(a);
@@ -238,7 +332,7 @@ function proposed(current: Record<string, unknown>, file: Record<string, unknown
 }
 
 /** This package's version, sent in the default User-Agent (a test pins it to package.json). */
-export const CLI_VERSION = '0.5.0';
+export const CLI_VERSION = '0.6.0';
 
 /** `COOKIEMUNCH_USER_AGENT`, else `cookiemunch-cli/<version>`. */
 function userAgent(io: CliIo): string {
@@ -311,7 +405,8 @@ async function configCommand(sub: string | undefined, p: Parsed, io: CliIo, clie
   if (sub === 'validate') {
     const file = await readConfigFile(io, p.positional[2]);
     const r = await client.sites.lintConfig(cbid, file as never, p.flags.replace === true ? { replace: true } : {});
-    if (r.designWarnings.length) io.stdout(`${formatDesignWarnings(r.designWarnings)}\n`);
+    if (p.flags.json === true) io.stdout(`${JSON.stringify({ cbid, designWarnings: r.designWarnings }, null, 2)}\n`);
+    else if (r.designWarnings.length) io.stdout(`${formatDesignWarnings(r.designWarnings)}\n`);
     io.stderr(`${summaryLine(r.designWarnings)}\n`);
     return p.flags.strict === true && countBySeverity(r.designWarnings).warnings > 0 ? 1 : 0;
   }
@@ -327,11 +422,12 @@ async function configCommand(sub: string | undefined, p: Parsed, io: CliIo, clie
       }
     }
     const changes = await configChanges(client, cbid, file, replace);
+    if (p.flags.json === true && (sub === 'diff' || changes.length === 0)) io.stdout(`${JSON.stringify({ cbid, changes }, null, 2)}\n`);
     if (changes.length === 0) {
       io.stderr(`No changes: ${cbid}'s config already matches.\n`);
       return 0;
     }
-    io.stdout(`${formatChanges(changes)}\n`);
+    if (p.flags.json !== true) io.stdout(`${formatChanges(changes)}\n`);
     if (sub === 'diff') {
       io.stderr(`${changes.length} change${changes.length === 1 ? '' : 's'} (nothing sent). Apply with: cookiemunch config push --site ${cbid} ${p.positional[2]}${replace ? ' --replace' : ''}\n`);
       return p.flags['exit-code'] === true ? 1 : 0;
@@ -341,6 +437,7 @@ async function configCommand(sub: string | undefined, p: Parsed, io: CliIo, clie
       : await client.sites.patchConfig(cbid, file as never)) as { designWarnings?: unknown };
     io.stderr(`Applied ${changes.length} change${changes.length === 1 ? '' : 's'} to ${cbid}.\n`);
     const found = Array.isArray(saved?.designWarnings) ? (saved.designWarnings as Parameters<typeof formatDesignWarnings>[0]) : [];
+    if (p.flags.json === true) io.stdout(`${JSON.stringify({ cbid, applied: changes, designWarnings: found }, null, 2)}\n`);
     if (found.length) io.stderr(`${formatDesignWarnings(found)}\n${summaryLine(found)}\n`);
     return 0;
   }
@@ -382,7 +479,7 @@ async function consentSyncCommand(sub: string | undefined, p: Parsed, io: CliIo,
   }
   if (sub === 'rotate') {
     const r = await client.consentSyncSecret.rotate(cbid);
-    io.stdout(`${r.secret}\n`);
+    io.stdout(p.flags.json === true ? `${JSON.stringify(r, null, 2)}\n` : `${r.secret}\n`);
     io.stderr('This secret is shown once: store it on your server (never in a page). A previous secret stopped working.\n');
     return 0;
   }
@@ -399,7 +496,8 @@ async function consentSyncCommand(sub: string | undefined, p: Parsed, io: CliIo,
     if (!subject) throw new UsageError('--subject <id> is required');
     const ttl = str(p.flags, 'ttl');
     try {
-      io.stdout(`${mintConsentSyncToken({ secret, cbid, subject, ...(ttl !== undefined ? { ttlSeconds: Number(ttl) } : {}) })}\n`);
+      const token = mintConsentSyncToken({ secret, cbid, subject, ...(ttl !== undefined ? { ttlSeconds: Number(ttl) } : {}) });
+      io.stdout(p.flags.json === true ? `${JSON.stringify({ token }, null, 2)}\n` : `${token}\n`);
     } catch (e) {
       throw new UsageError((e as Error).message);
     }
@@ -445,6 +543,13 @@ async function executorsCommand(
     io.stdout(`${JSON.stringify(await client.fulfillment.executorPresets(), null, 2)}\n`);
     return 0;
   }
+  if (sub === 'conformance') return conformanceCommand(p, io, client);
+  if (sub === 'roll-completion-secret') {
+    const id = p.positional[2];
+    if (!id) throw new UsageError('executors roll-completion-secret <id> needs the connection id');
+    io.stdout(`${JSON.stringify(await client.fulfillment.rollExecutorCompletionSecret(id), null, 2)}\n`);
+    return 0;
+  }
   if (sub === 'upgrade-preset') {
     const id = p.positional[2];
     if (!id) throw new UsageError('executors upgrade-preset <id> needs the connection id');
@@ -453,11 +558,14 @@ async function executorsCommand(
     const preset = str(p.flags, 'preset');
     const orgId = str(p.flags, 'org-id');
     const atlasIdAppId = str(p.flags, 'atlas-id-app-id');
+    const accept = str(p.flags, 'accept-preset');
     const input = {
       ...(preset ? { preset: preset as never } : {}),
       ...(version ? { presetVersion: Number(version) } : {}),
       ...(orgId ? { orgId } : {}),
       ...(atlasIdAppId ? { atlasIdAppId } : {}),
+      ...(p.flags['revoke-atlas-id-grant'] === true ? { revokeAtlasIdGrant: true } : {}),
+      ...(accept ? { acceptPreset: accept.split('\n') } : {}),
     };
     const r =
       p.flags['dry-run'] === true
@@ -466,7 +574,23 @@ async function executorsCommand(
     io.stdout(`${JSON.stringify(r, null, 2)}\n`);
     return 0;
   }
-  if (sub !== 'test') throw new UsageError(`unknown executors command: ${sub ?? '(none)'} — use test, webhook-test, deliveries, presets or upgrade-preset`);
+  if (sub === 'recheck') {
+    const id = p.positional[2];
+    if (!id) throw new UsageError('executors recheck <id> needs the connection id');
+    const r = await client.fulfillment.recheckExecutor(id);
+    io.stdout(`${JSON.stringify(r, null, 2)}\n`);
+    // A deploy hook: a failing check fails the step.
+    return r.ok === false ? 1 : 0;
+  }
+  if (sub === 'health') {
+    const id = p.positional[2];
+    if (!id) throw new UsageError('executors health <id> needs the connection id');
+    const limit = str(p.flags, 'limit');
+    if (limit !== undefined && !/^[1-9]\d*$/.test(limit)) throw new UsageError('--limit must be a whole number from 1 to 50');
+    io.stdout(`${JSON.stringify(await client.fulfillment.executorHealthHistory(id, limit ? { limit: Number(limit) } : {}), null, 2)}\n`);
+    return 0;
+  }
+  if (sub !== 'test') throw new UsageError(`unknown executors command: ${sub ?? '(none)'} — use test, webhook-test, deliveries, presets, upgrade-preset, conformance, roll-completion-secret, recheck or health`);
   const id = p.positional[2];
   if (!id) throw new UsageError('executors test <id> needs the connection id');
   const canary = p.flags.canary === true;
@@ -491,6 +615,48 @@ async function executorsCommand(
     }
     throw e;
   }
+}
+
+/** One rule per line: PASS/FAIL/SKIP, its id, and what was seen when it did not pass. */
+function printConformance(io: CliIo, report: { ok: boolean; passed: number; failed: number; skipped: number; rules: Array<{ id: string; title: string; status: string; detail?: string }> }, asJson: boolean): number {
+  if (asJson) {
+    io.stdout(`${JSON.stringify(report, null, 2)}\n`);
+  } else {
+    for (const r of report.rules) {
+      io.stdout(`${r.status.toUpperCase().padEnd(4)}  ${r.id}  ${r.title}\n`);
+      if (r.detail && r.status !== 'pass') io.stdout(`      ${r.detail}\n`);
+    }
+    io.stdout(`\n${report.passed} passed, ${report.failed} failed, ${report.skipped} skipped\n`);
+  }
+  return report.ok ? 0 : 1;
+}
+
+async function conformanceCommand(p: Parsed, io: CliIo, client: CookieMunchClient | null): Promise<number> {
+  const asJson = p.flags.json === true;
+  const connection = str(p.flags, 'connection');
+  if (connection) {
+    if (!client) throw new UsageError('--connection runs on Cookie Munch: set COOKIEMUNCH_API_KEY');
+    return printConformance(io, await client.fulfillment.executorConformance(connection), asJson);
+  }
+  const baseUrl = p.positional[2];
+  if (!baseUrl) throw new UsageError('executors conformance <baseUrl> --secret-env <NAME> (or --connection <id>)');
+  const secretEnv = str(p.flags, 'secret-env');
+  if (!secretEnv) throw new UsageError('--secret-env <NAME> names the environment variable holding the executor credential');
+  const secret = io.env[secretEnv];
+  if (!secret) throw new UsageError(`the environment variable ${secretEnv} is empty`);
+  let canaryEmail = str(p.flags, 'canary-email');
+  if (!canaryEmail) {
+    if (!client) throw new UsageError('pass --canary-email, or set COOKIEMUNCH_API_KEY to use your organisation\'s canary address');
+    canaryEmail = (await client.fulfillment.executorPresets()).canaryEmail;
+  }
+  const prefix = str(p.flags, 'prefix');
+  let report;
+  try {
+    report = await runExecutorConformance({ baseUrl, secret, canaryEmail, fetch: io.fetch, ...(prefix ? { prefix } : {}) });
+  } catch (e) {
+    throw new UsageError((e as Error).message);
+  }
+  return printConformance(io, report, asJson);
 }
 
 async function scanCommand(p: Parsed, io: CliIo, client: CookieMunchClient): Promise<number> {
@@ -529,10 +695,13 @@ async function scanCommand(p: Parsed, io: CliIo, client: CookieMunchClient): Pro
   return 0;
 }
 
-const PRESET_VENDORS = ['atlas', 'forumulate', 'chatly', 'cookiemunch', 'referally'] as const;
+const PRESET_VENDORS = ['atlas', 'forumulate', 'chatly', 'cookiemunch', 'referalli', 'firstpromoter', 'partnerstack', 'tapfiliate', 'impact'] as const;
+/** Old preset names still accepted (the server answers them with a Deprecation header). */
+const PRESET_ALIASES: Record<string, Vendor> = { referally: 'referalli' };
 type Vendor = (typeof PRESET_VENDORS)[number];
 
 function vendorArg(v: string | undefined): Vendor {
+  if (v && Object.prototype.hasOwnProperty.call(PRESET_ALIASES, v)) return PRESET_ALIASES[v]!;
   if (!v || !(PRESET_VENDORS as readonly string[]).includes(v)) throw new UsageError(`a vendor is required: ${PRESET_VENDORS.join(', ')}`);
   return v as Vendor;
 }
@@ -559,6 +728,11 @@ async function cookiesCommand(sub: string | undefined, p: Parsed, io: CliIo, cli
     print(await client.sites.cookiePresets(requireSite(p, io)));
     return 0;
   }
+  // A custom preset (import-manifest) is removed by its product id, which no list here knows.
+  if (sub === 'unpreset' && p.positional[2] && !(PRESET_VENDORS as readonly string[]).includes(p.positional[2])) {
+    print(await client.sites.removeCookiePreset(requireSite(p, io), p.positional[2], dry));
+    return 0;
+  }
   if (sub === 'preset' || sub === 'unpreset') {
     const cbid = requireSite(p, io);
     const vendor = vendorArg(p.positional[2]);
@@ -571,6 +745,32 @@ async function cookiesCommand(sub: string | undefined, p: Parsed, io: CliIo, cli
     if (r.note) io.stderr(`${r.note}\n`);
     for (const s of r.skipped ?? []) io.stderr(`skipped ${s.name}: ${s.reason}\n`);
     if (r.manifest.status === 'waiting_on_vendor') io.stderr(`Built-in rows: ${r.manifest.waitingOn} does not publish a manifest yet (${r.manifest.item}).\n`);
+    return 0;
+  }
+  // Any vendor's embed manifest as a preset; what to declare; declare it (CMU-X36, CMU-D15).
+  if (sub === 'import-manifest') {
+    const cbid = requireSite(p, io);
+    const src = p.positional[2];
+    const file = str(p.flags, 'file');
+    if (!src && !file) throw new UsageError('a manifest URL (https://…/.well-known/forgedeck-embed.json) or --file <manifest.json> is required');
+    const input = file ? { manifest: JSON.parse(await io.readFile(file)) as never } : { url: src! };
+    const r = await client.sites.importCookieManifest(cbid, input, dry);
+    print(r);
+    for (const s of r.skipped ?? []) io.stderr(`skipped ${s.name}: ${s.reason}\n`);
+    return 0;
+  }
+  if (sub === 'suggestions') {
+    const r = await client.sites.cookieSuggestions(requireSite(p, io));
+    print(r);
+    io.stderr(`${r.suggestions.length} suggestion${r.suggestions.length === 1 ? '' : 's'}; ${r.vendors.length} platform${r.vendors.length === 1 ? '' : 's'} detected.\n`);
+    return 0;
+  }
+  if (sub === 'declare-suggestions') {
+    const cbid = requireSite(p, io);
+    const names = str(p.flags, 'names');
+    const r = await client.sites.declareCookieSuggestions(cbid, names ? { names: names.split(',').map((n) => n.trim()).filter(Boolean) } : {}, dry);
+    print(r);
+    io.stderr(`${dry ? 'Would declare' : 'Declared'} ${r.declaredCount} row${r.declaredCount === 1 ? '' : 's'} and ${r.presetsApplied.length} preset${r.presetsApplied.length === 1 ? '' : 's'}.\n`);
     return 0;
   }
   if (sub === 'delete-observed') {
@@ -599,6 +799,9 @@ async function cookiesCommand(sub: string | undefined, p: Parsed, io: CliIo, cli
 
 /** Run the CLI. Returns the process exit code: 0 ok, 1 failed, 2 usage. */
 export async function run(argv: string[], io: CliIo): Promise<number> {
+  // CMU-B15: a leading --version (or -V) prints the version and needs no key. Only leading: `--version <n>`
+  // is a value flag of `executors upgrade-preset`.
+  if (argv[0] === '--version' || argv[0] === '-V') return versionCommand(io, CLI_VERSION, io.env.COOKIEMUNCH_BASE_URL || DEFAULT_BASE_URL, argv.includes('--json'));
   let p: Parsed;
   try {
     p = parseArgs(argv);
@@ -607,18 +810,74 @@ export async function run(argv: string[], io: CliIo): Promise<number> {
     return 2;
   }
   const [cmd, sub] = p.positional;
+  // `version [--json]` needs no key either.
+  if (cmd === 'version') {
+    return versionCommand(io, CLI_VERSION, io.env.COOKIEMUNCH_BASE_URL || DEFAULT_BASE_URL, p.flags.json === true);
+  }
   if (!cmd || p.flags.help === true || cmd === 'help') {
     io.stdout(USAGE);
     return cmd || p.flags.help === true ? 0 : 2;
+  }
+  // The conformance kit checks the open contract against any system; with --canary-email it
+  // needs no Cookie Munch key at all, so anyone implementing the contract can run it.
+  if (cmd === 'executors' && sub === 'conformance' && !io.env.COOKIEMUNCH_API_KEY && str(p.flags, 'canary-email')) {
+    try {
+      return await conformanceCommand(p, io, null);
+    } catch (e) {
+      if (e instanceof UsageError) {
+        io.stderr(`${e.message}\n`);
+        return 2;
+      }
+      throw e;
+    }
+  }
+  const base = io.env.COOKIEMUNCH_BASE_URL || DEFAULT_BASE_URL;
+  // Every embed manifest is public: csp needs no key.
+  if (cmd === 'csp') {
+    try {
+      const merge = str(p.flags, 'merge');
+      const framework = str(p.flags, 'framework');
+      const site = str(p.flags, 'site') ?? io.env.COOKIEMUNCH_SITE;
+      return await cspCommand(
+        { apiBase: base, ...(merge ? { merge } : {}), ...(framework ? { framework } : {}), ...(site ? { site } : {}) },
+        io,
+        (m) => new UsageError(m),
+      );
+    } catch (e) {
+      if (e instanceof UsageError) {
+        io.stderr(`${e.message}\n\n${USAGE}`);
+        return 2;
+      }
+      io.stderr(`${(e as Error).message ?? String(e)}\n`);
+      return 1;
+    }
   }
   const key = io.env.COOKIEMUNCH_API_KEY;
   if (!key) {
     io.stderr('COOKIEMUNCH_API_KEY is not set. Create a key under Developers in the dashboard.\n');
     return 2;
   }
-  const base = io.env.COOKIEMUNCH_BASE_URL || DEFAULT_BASE_URL;
-  const client = createCookieMunch({ apiKey: key, baseUrl: base, fetch: io.fetch, userAgent: userAgent(io), ...(io.env.COOKIEMUNCH_STRICT_FIELDS === '1' ? { strictUnknownFields: true } : {}) });
+  const client = createCookieMunch({
+    apiKey: key, baseUrl: base, fetch: io.fetch, userAgent: userAgent(io),
+    ...(io.env.COOKIEMUNCH_STRICT_FIELDS === '1' ? { strictUnknownFields: true } : {}),
+    ...(io.env.COOKIEMUNCH_SECRET_RECIPIENT ? { secretRecipient: io.env.COOKIEMUNCH_SECRET_RECIPIENT } : {}),
+    ...(typeof p.flags['idempotency-key'] === 'string' ? { headers: { 'Idempotency-Key': p.flags['idempotency-key'] } } : {}),
+  });
+  const ops: OpsHelpers = {
+    requireSite: () => requireSite(p, io),
+    site: () => str(p.flags, 'site') ?? io.env.COOKIEMUNCH_SITE,
+    readJson: (path) => readConfigFile(io, path),
+    usage: (m) => new UsageError(m),
+    flag: (name) => p.flags[name],
+    positional: p.positional,
+  };
   try {
+    if (cmd === 'cookies' && (sub === 'diff' || sub === 'push')) return await cookiesFileCommand(sub, io, client, ops);
+    if (cmd === 'executors' && (sub === 'pull' || sub === 'diff' || sub === 'push')) return await executorsFileCommand(sub, io, client, ops);
+    if (cmd === 'dsar' && sub === 'test') return await dsarTestCommand(io, client, ops);
+    if (cmd === 'doctor') return await doctorCommand(io, client, ops, CLI_VERSION);
+    if (cmd === 'keys' && sub && sub !== 'report') return await keysExtraCommand(sub, io, client, ops);
+    if (cmd === 'plan' || cmd === 'apply') return await bundleCommand(cmd, io, client, ops);
     if (cmd === 'config') return await configCommand(sub, p, io, client);
     if (cmd === 'preview') return await previewCommand(p, io, client);
     if (cmd === 'scan') return await scanCommand(p, io, client);
@@ -632,7 +891,7 @@ export async function run(argv: string[], io: CliIo): Promise<number> {
       usage: (m: string) => new UsageError(m),
       flag: (name: string) => p.flags[name],
     };
-    if (cmd === 'site') return await siteCommand(sub, io, client, helpers);
+    if (cmd === 'site') return await siteCommand(sub, io, client, helpers, p.positional[2]);
     if (cmd === 'health') return await healthCommand(io, client, helpers);
     if (cmd === 'provision') return await provisionCommand(sub, io, client, helpers);
     if (cmd === 'keys') return await keysCommand(sub, io, client, helpers);

@@ -1,0 +1,77 @@
+# Cookie Munch plan: comment `cookiemunch plan` on a pull request (CMU-D12).
+#
+#   - uses: Cookie-Munch/cli/plan-action@main
+#     with:
+#       bundle: cookiemunch.json
+#       api-key: ${{ secrets.COOKIEMUNCH_PLAN_KEY }}
+#
+# A plan writes nothing anywhere: it is the server's dry run of every part of the bundle. The server still
+# checks a dry run of a write as that write, so the key needs the scopes `apply` would (sites:write for the
+# site, config, cookies and presets; webhooks:read, dsar:read and sites:read for the lists). Prefer a key
+# vended per run, e.g. `cookiemunch keys vend --scopes sites:write,sites:read,webhooks:read,dsar:read --ttl 1h`,
+# over a long-lived one in a repository secret.
+# The comment is updated in place on every push, so a pull request carries one plan, not one per commit.
+name: Cookie Munch plan
+description: Comment the Cookie Munch plan (the server's dry run of a cookiemunch.json bundle) on a pull request.
+branding:
+  icon: shield
+  color: orange
+inputs:
+  bundle:
+    description: Path to the cookiemunch.json bundle.
+    default: cookiemunch.json
+  api-key:
+    description: A Cookie Munch API key scoped to the site (see the header). Never a full-access key.
+    required: true
+  base-url:
+    description: The API origin.
+    default: https://api.cookiemunch.net
+  cli-version:
+    description: The @cookiemunch/cli version to run.
+    default: latest
+  github-token:
+    description: Token used to write the comment.
+    default: ${{ github.token }}
+outputs:
+  changes:
+    description: How many changes the plan found (0 = the bundle matches).
+    value: ${{ steps.plan.outputs.changes }}
+runs:
+  using: composite
+  steps:
+    - id: plan
+      shell: bash
+      env:
+        COOKIEMUNCH_API_KEY: ${{ inputs.api-key }}
+        COOKIEMUNCH_BASE_URL: ${{ inputs.base-url }}
+        BUNDLE: ${{ inputs.bundle }}
+        CLI_VERSION: ${{ inputs.cli-version }}
+      run: |
+        set -euo pipefail
+        npx -y "@cookiemunch/cli@${CLI_VERSION}" plan "$BUNDLE" --json > "$RUNNER_TEMP/cm-plan.json"
+        npx -y "@cookiemunch/cli@${CLI_VERSION}" plan "$BUNDLE" > "$RUNNER_TEMP/cm-plan.txt" 2>&1 || true
+        echo "changes=$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).changes)' "$RUNNER_TEMP/cm-plan.json")" >> "$GITHUB_OUTPUT"
+    - if: github.event_name == 'pull_request'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        PR: ${{ github.event.pull_request.number }}
+        REPO: ${{ github.repository }}
+        CHANGES: ${{ steps.plan.outputs.changes }}
+      run: |
+        set -euo pipefail
+        marker='<!-- cookiemunch-plan -->'
+        {
+          echo "$marker"
+          if [ "$CHANGES" = "0" ]; then echo "**Cookie Munch plan:** No changes."; else echo "**Cookie Munch plan:** $CHANGES change(s)."; fi
+          echo
+          echo '```'
+          cat "$RUNNER_TEMP/cm-plan.txt"
+          echo '```'
+        } > "$RUNNER_TEMP/cm-comment.md"
+        existing=$(gh api "repos/$REPO/issues/$PR/comments" --paginate --jq ".[] | select(.body | startswith(\"$marker\")) | .id" | head -n1)
+        if [ -n "$existing" ]; then
+          gh api -X PATCH "repos/$REPO/issues/comments/$existing" -F body=@"$RUNNER_TEMP/cm-comment.md" > /dev/null
+        else
+          gh api -X POST "repos/$REPO/issues/$PR/comments" -F body=@"$RUNNER_TEMP/cm-comment.md" > /dev/null
+        fi

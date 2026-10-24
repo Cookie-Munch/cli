@@ -22,7 +22,7 @@ export interface Change {
  * Returned by a config read, never a setting; the server drops them from a write
  * (packages/server/src/site-config-write.ts READ_ONLY_CONFIG_FIELDS, pinned by a test).
  */
-export const READ_ONLY_CONFIG_FIELDS = ['effective', 'warnings', 'designWarnings', 'region', 'regulation', 'copy', 'rightsFormUrl', 'version', 'observeToken'] as const;
+export const READ_ONLY_CONFIG_FIELDS = ['effective', 'warnings', 'designWarnings', 'region', 'regulation', 'copy', 'rightsFormUrl', 'version', 'observeToken', 'sdkBoot', 'originEnv'] as const;
 
 /** A copy of a config without its read-only fields, so a pulled file diffs clean against the server. */
 export function withoutReadOnly(cfg: Record<string, unknown>): Record<string, unknown> {

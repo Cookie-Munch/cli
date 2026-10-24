@@ -20,6 +20,20 @@ describe('cookiemunch site update', () => {
   });
 });
 
+describe('cookiemunch site brand (CMU-X44)', () => {
+  const RB = { cbid: 'acme', source: { type: 'body' }, importedAt: 1, precedence: 'p', mapping: [], ignored: [], warnings: [{ role: 'font.body.url', code: 'third_party_font_host', message: 'served from fonts.googleapis.com' }] };
+  it('--url imports by URL, a file imports its document, neither prints the last import', async () => {
+    const h = harness({ files: { 'brand.json': JSON.stringify({ color: { accent: { $value: '#0e9f6e' } } }) }, respond: (c) => (c.url.includes('/v1/sites/acme/brand') ? { status: 200, body: RB } : undefined) });
+    expect(await run(['site', 'brand', '--site', 'acme', '--url', 'https://acme.com/brand.json', '--dry-run'], h.io)).toBe(0);
+    expect(h.calls[0]).toMatchObject({ method: 'PUT', url: 'https://api.test/v1/sites/acme/brand?dryRun=1', body: { url: 'https://acme.com/brand.json' } });
+    expect(h.err()).toMatch(/warning \(font\.body\.url\): served from fonts\.googleapis\.com/);
+    expect(await run(['site', 'brand', 'brand.json', '--site', 'acme'], h.io)).toBe(0);
+    expect(h.calls[1]).toMatchObject({ method: 'PUT', url: 'https://api.test/v1/sites/acme/brand', body: { color: { accent: { $value: '#0e9f6e' } } } });
+    expect(await run(['site', 'brand', '--site', 'acme'], h.io)).toBe(0);
+    expect(h.calls[2]).toMatchObject({ method: 'GET', url: 'https://api.test/v1/sites/acme/brand' });
+  });
+});
+
 describe('cookiemunch health', () => {
   it('prints each check and exits 1 when one fails', async () => {
     const report = { cbid: 'acme', checkedAt: 1, ok: false, counts: { error: 0, warning: 1, notChecked: 0 }, checks: [
@@ -31,6 +45,32 @@ describe('cookiemunch health', () => {
     expect(h.calls[0]!.url).toBe('https://api.test/v1/integration-health?cbid=acme');
     expect(h.out()).toMatch(/WARN mail_provider/);
     expect(h.out()).toMatch(/fix: PUT \/v1\/org\/mail-provider/);
+  });
+});
+
+describe('cookiemunch health --json --fail-on', () => {
+  const report = { cbid: 'acme', checkedAt: 1, ok: false, counts: { error: 0, warning: 1, notChecked: 0, waived: 1 }, checks: [
+    { check: 'mail_provider', ok: false, severity: 'warning', subject: 'o', lastCheckedAt: 1 },
+    { check: 'atlas.cookie_consent', ok: null, severity: 'error', subject: 'acme', waived: { reason: 'other domain', by: 'k', until: null }, lastCheckedAt: 1 },
+    { check: 'site.domain_resolves', ok: true, severity: 'info', subject: 'acme.com', hop: 'http', status: 200, elapsedMs: 30, lastCheckedAt: 1 },
+  ] };
+  const respond = (c: { url: string }) => (c.url.startsWith('https://api.test/v1/integration-health') ? { status: 200, body: report } : undefined);
+  it('--fail-on error passes with only warnings; --fail-on warning (the default) fails; --json prints the report', async () => {
+    let h = harness({ respond });
+    expect(await run(['health', '--site', 'acme', '--json', '--fail-on', 'error'], h.io)).toBe(0);
+    expect(JSON.parse(h.out())).toMatchObject({ cbid: 'acme', counts: { warning: 1 } });
+    h = harness({ respond });
+    expect(await run(['health', '--site', 'acme', '--fail-on', 'warning'], h.io)).toBe(1);
+    h = harness({ respond });
+    expect(await run(['health', '--site', 'acme', '--fail-on', 'never'], h.io)).toBe(0);
+    h = harness({ respond });
+    expect(await run(['health', '--site', 'acme', '--fail-on', 'sometimes'], h.io)).toBe(2);
+  });
+  it('shows a waiver and the hop', async () => {
+    const h = harness({ respond });
+    await run(['health', '--site', 'acme'], h.io);
+    expect(h.out()).toMatch(/WAIV atlas.cookie_consent .*waived: other domain/);
+    expect(h.out()).toMatch(/ok   site.domain_resolves .*\(http 200, 30 ms\)/);
   });
 });
 

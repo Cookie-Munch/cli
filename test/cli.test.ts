@@ -335,3 +335,73 @@ describe('executors presets / upgrade-preset / test --canary', () => {
     expect(await run(['executors', 'test', 'ex_1', '--canary', '--email', 'a@b.co'], harness().io)).toBe(2);
   });
 });
+
+describe('executors recheck / health / upgrade-preset --accept-preset (CMU-D07, CMU-D08)', () => {
+  it('recheck posts the deploy-hook canary and exits 1 when it fails', async () => {
+    const ok = harness({ respond: (c) => (c.url.endsWith('/recheck') ? { status: 200, body: { ok: true, canary: true } } : undefined) });
+    expect(await run(['executors', 'recheck', 'ex_1'], ok.io)).toBe(0);
+    expect(ok.calls[0]).toEqual(expect.objectContaining({ method: 'POST', url: 'https://api.test/v1/dsar/executors/ex_1/recheck' }));
+    const bad = harness({ respond: (c) => (c.url.endsWith('/recheck') ? { status: 200, body: { ok: false, verdict: 'x' } } : undefined) });
+    expect(await run(['executors', 'recheck', 'ex_1'], bad.io)).toBe(1);
+    expect(await run(['executors', 'recheck'], harness().io)).toBe(2);
+  });
+
+  it('health prints the history, with --limit', async () => {
+    const h = harness({ respond: (c) => (c.url.includes('/health/history') ? { status: 200, body: [{ ok: true, lastCheckedAt: 1, verdict: 'v' }] } : undefined) });
+    expect(await run(['executors', 'health', 'ex_1', '--limit', '5'], h.io)).toBe(0);
+    expect(h.calls[0]).toEqual(expect.objectContaining({ method: 'GET', url: 'https://api.test/v1/dsar/executors/ex_1/health/history?limit=5' }));
+    expect(await run(['executors', 'health', 'ex_1', '--limit', 'x'], harness().io)).toBe(2);
+  });
+
+  it('upgrade-preset takes --accept-preset (repeatable) and --revoke-atlas-id-grant', async () => {
+    const h = harness({ respond: () => ({ status: 200, body: { dryRun: true, diff: [] } }) });
+    expect(await run(['executors', 'upgrade-preset', 'ex_1', '--accept-preset', 'profile.grantRevoke', '--accept-preset', 'profile.versionHeader', '--revoke-atlas-id-grant', '--dry-run'], h.io)).toBe(0);
+    expect(h.calls[0]).toEqual(expect.objectContaining({
+      method: 'POST',
+      url: 'https://api.test/v1/dsar/executors/ex_1/upgrade-preset?dryRun=1',
+      body: { acceptPreset: ['profile.grantRevoke', 'profile.versionHeader'], revokeAtlasIdGrant: true },
+    }));
+  });
+});
+
+describe('executors conformance (CMU-X20)', () => {
+  const canary = 'canary-0123456789abcdef@canary.cookiemunch.net';
+  async function withReference(violate?: { deleteImmediately?: boolean }) {
+    const { referenceExecutor } = await import('./fixtures/reference-executor.js');
+    const ref = referenceExecutor({ secret: 'sk_exec_1', canaryEmail: canary, ...(violate ? { violate } : {}) });
+    const h = harness({ env: { EXEC_SECRET: 'sk_exec_1' } });
+    h.io.fetch = ((url: string, init?: RequestInit) => (String(url).startsWith('https://exec.example') ? ref(url, init) : Promise.resolve(new Response('{}', { status: 404 })))) as typeof fetch;
+    return h;
+  }
+
+  it('runs the kit against any base URL with the secret from the environment, and passes the reference executor', async () => {
+    const h = await withReference();
+    expect(await run(['executors', 'conformance', 'https://exec.example', '--secret-env', 'EXEC_SECRET', '--canary-email', canary], h.io)).toBe(0);
+    expect(h.out()).toMatch(/PASS\s+requests\.execute_after\.scheduled/);
+    expect(h.out()).toMatch(/15 passed, 0 failed, 0 skipped/);
+    expect(h.out()).not.toContain('sk_exec_1');
+  });
+
+  it('exits 1 and names the rule for an executor that deletes before executeAfter', async () => {
+    const h = await withReference({ deleteImmediately: true });
+    expect(await run(['executors', 'conformance', 'https://exec.example', '--secret-env', 'EXEC_SECRET', '--canary-email', canary], h.io)).toBe(1);
+    expect(h.out()).toMatch(/FAIL\s+requests\.execute_after\.scheduled/);
+  });
+
+  it('needs no Cookie Munch key with --canary-email, and refuses a missing secret', async () => {
+    const h = await withReference();
+    delete h.io.env.COOKIEMUNCH_API_KEY;
+    expect(await run(['executors', 'conformance', 'https://exec.example', '--secret-env', 'EXEC_SECRET', '--canary-email', canary], h.io)).toBe(0);
+    expect(await run(['executors', 'conformance', 'https://exec.example', '--secret-env', 'NOPE', '--canary-email', canary], h.io)).toBe(2);
+  });
+
+  it('--connection runs it on Cookie Munch; roll-completion-secret prints the new secret', async () => {
+    const h = harness({ respond: () => ({ status: 200, body: { ok: true, passed: 15, failed: 0, skipped: 0, rules: [], completionSecret: 'whsec_x' } }) });
+    expect(await run(['executors', 'conformance', '--connection', 'ex_1', '--json'], h.io)).toBe(0);
+    expect(await run(['executors', 'roll-completion-secret', 'ex_1'], h.io)).toBe(0);
+    expect(h.calls).toEqual([
+      expect.objectContaining({ method: 'POST', url: 'https://api.test/v1/dsar/executors/ex_1/test', body: { conformance: true } }),
+      expect.objectContaining({ method: 'POST', url: 'https://api.test/v1/dsar/executors/ex_1/completion-secret/roll' }),
+    ]);
+  });
+});
