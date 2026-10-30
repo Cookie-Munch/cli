@@ -2,7 +2,7 @@
  * `cookiemunch csp --merge <vendors|urls> [--framework next|express|nginx] [--site <cbid>]`
  *
  * One Content-Security-Policy from several products' embed manifests
- * (`/.well-known/forgedeck-embed.json`, schema https://cookiemunch.net/schemas/embed-v1.json):
+ * (`/.well-known/<product>-embed.json`, schema https://cookiemunch.net/schemas/embed-v1.json):
  * each manifest lists its origins by directive (`csp`) and the non-origin sources it needs
  * (`requires`); the policy is their union, plus `'self'`.
  *
@@ -59,15 +59,15 @@ export function manifestSources(list: string, opts: { site?: string; apiBase: st
       sources.push({ label: `cookiemunch (site ${opts.site})`, urls: [`${opts.apiBase.replace(/\/$/, '')}/v1/embed?cbid=${encodeURIComponent(opts.site)}`], product: name });
       continue;
     }
-    // Each product's manifest under its own name first; the suite-named path is the fallback.
-    const own = hosts.map((h) => `https://${h}/.well-known/${name}-embed.json`);
-    sources.push({ label: name, urls: [...own, ...hosts.map((h) => `https://${h}/.well-known/forgedeck-embed.json`)], product: name });
+    // Each product's manifest under its own name, on each of its hosts.
+    sources.push({ label: name, urls: hosts.map((h) => `https://${h}/.well-known/${name}-embed.json`), product: name });
   }
   return { sources, unknown };
 }
 
 const ORIGIN = /^(https|wss):\/\/[^\s*'"]+$/;
-const KEYWORD = /^('unsafe-inline'|'unsafe-eval'|'wasm-unsafe-eval'|'unsafe-hashes'|data:|blob:)$/;
+// A hash source ('sha256-…') is a keyword here: copied verbatim, never read as an origin.
+const KEYWORD = /^('unsafe-inline'|'unsafe-eval'|'wasm-unsafe-eval'|'unsafe-hashes'|data:|blob:|'sha(256|384|512)-[A-Za-z0-9+/_-]+={0,2}')$/;
 
 /** The union of every surface's origins and requirements, by directive; `'self'` first. */
 export function mergeManifests(manifests: Manifest[]): Map<string, string[]> {
@@ -183,7 +183,7 @@ export async function cspCommand(
     throw usage(`--framework must be one of ${CSP_FRAMEWORKS.join(', ')}`);
   }
   const { sources, unknown } = manifestSources(opts.merge, { apiBase: opts.apiBase, ...(opts.site ? { site: opts.site } : {}) });
-  if (unknown.length) throw usage(`unknown vendor: ${unknown.join(', ')}. Name one of ${Object.keys(KNOWN_MANIFEST_HOSTS).join(', ')}, or pass its manifest URL (https://…/.well-known/forgedeck-embed.json).`);
+  if (unknown.length) throw usage(`unknown vendor: ${unknown.join(', ')}. Name one of ${Object.keys(KNOWN_MANIFEST_HOSTS).join(', ')}, or pass its manifest URL (https://…/.well-known/<product>-embed.json).`);
   const manifests: Manifest[] = [];
   let failed = 0;
   for (const src of sources) {

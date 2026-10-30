@@ -82,9 +82,9 @@ export async function healthCommand(io: CliIo, client: CookieMunchClient, h: Hel
 /** `cookiemunch provision <file> [--dry-run]` — the file has no secrets; the environment supplies them. */
 export async function provisionCommand(file: string | undefined, io: CliIo, client: CookieMunchClient, h: Helpers): Promise<number> {
   const input = (await h.readJson(file)) as unknown as ProvisionRequest;
-  // v2 (a forgedeck body): `self.keyEnv` names the env var holding the product's own API key (never in the file).
+  // v2 (a version 2 body): `self.keyEnv` names the env var holding the product's own API key (never in the file).
   const v2 = input as unknown as Record<string, any>;
-  if (v2.forgedeck !== undefined || (v2.site && typeof v2.site === 'object')) {
+  if (v2.stack !== undefined || (v2.site && typeof v2.site === 'object')) {
     const body: Record<string, any> = { ...v2 };
     if (body.self) {
       const { keyEnv, ...self } = body.self as Record<string, unknown>;

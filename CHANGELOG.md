@@ -2,9 +2,14 @@
 
 Every published release, newest first. Dates are the day the version was cut.
 
+## Unreleased
+
+- Removed: `cookiemunch csp --merge <product>` reads each product's manifest only under its own name (`/.well-known/<product>-embed.json`); the suite-wide fallback is gone.
+- Changed: a version 2 `provision` body names its block `stack` (the server still reads the former name).
+
 ## 0.7.1 (2026-10-24)
 
-- Changed: `cookiemunch csp --merge <product>` reads each product's manifest under its own name first (`/.well-known/<product>-embed.json`), and the suite-named `forgedeck-embed.json` only as a fallback.
+- Changed: `cookiemunch csp --merge <product>` reads each product's manifest under its own name first (`/.well-known/<product>-embed.json`), and the suite-wide manifest name only as a fallback.
 
 ## 0.7.0 (2026-10-24)
 
@@ -19,7 +24,7 @@ Every published release, newest first. Dates are the day the version was cut.
 - Added: `cookies diff|push <file>`, `executors pull|diff|push <file> [--secret-env NAME]` (files never carry a secret), `dsar test [--types …] [--with-cbid] [--without-cbid] [--cleanup]` (deletes only what it filed), `doctor`.
 - Added: `plan` / `apply` over one `cookiemunch.json` bundle, and the `plan-action` GitHub Action that comments the plan on a pull request.
 - Added: `keys vend --scopes … --ttl 1h`, `keys self`, `keys rotate-self`; `keys report` lists revoked keys.
-- Added: `--json` on every command; `--idempotency-key`; `COOKIEMUNCH_SECRET_RECIPIENT` for sealed secrets; `provision` takes a forgedeck (v2) body and `--from-step`.
+- Added: `--json` on every command; `--idempotency-key`; `COOKIEMUNCH_SECRET_RECIPIENT` for sealed secrets; `provision` takes a version 2 body and `--from-step`.
 - Changed: `partners link --partner` takes any partner the deployment knows.
 - Added: `cookiemunch csp --merge <vendors|urls> [--framework next|express|nginx]` (needs no key), `cookies suggestions` / `declare-suggestions` / `import-manifest`, `site brand`, `health --fail-on`.
 - Changed: built on `@cookiemunch/sdk` 0.6.0.

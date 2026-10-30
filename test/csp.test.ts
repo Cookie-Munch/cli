@@ -28,10 +28,10 @@ describe('cookiemunch csp', () => {
       env: { COOKIEMUNCH_API_KEY: '' },
       respond: (c) =>
         c.url === 'https://cookiemunch.net/.well-known/cookiemunch-embed.json' ? { status: 200, body: CM }
-          : c.url === 'https://acmechat.example/.well-known/forgedeck-embed.json' ? { status: 200, body: VENDOR }
+          : c.url === 'https://acmechat.example/.well-known/acmechat-embed.json' ? { status: 200, body: VENDOR }
             : undefined,
     });
-    expect(await run(['csp', '--merge', 'cookiemunch,https://acmechat.example/.well-known/forgedeck-embed.json'], h.io)).toBe(0);
+    expect(await run(['csp', '--merge', 'cookiemunch,https://acmechat.example/.well-known/acmechat-embed.json'], h.io)).toBe(0);
     const header = h.out().trim();
     expect(header).toBe(
       "default-src 'self'; connect-src 'self' https://api.cookiemunch.net wss://ws.acmechat.example; img-src 'self' data: https://cdn.cookiemunch.net; "
@@ -41,21 +41,23 @@ describe('cookiemunch csp', () => {
     expect(h.err()).toContain('https://{tenant}.acmechat.example');
   });
 
+  it('keeps a hash source from requires as a source of its own, never an origin (CMU-PM-04)', () => {
+    const hash = `'sha384-${'B'.repeat(64)}'`;
+    const policy = mergeManifests([{ surfaces: { widget: { csp: { 'script-src': ['https://widget.chatlychat.com'] }, requires: { 'script-src': [hash, "'nonce-x'"] } } } }]);
+    expect(policy.get('script-src')).toEqual(["'self'", hash, 'https://widget.chatlychat.com']);
+  });
+
   it('falls back to the API host, reports a product that publishes nothing, and still prints the rest (exit 1)', async () => {
     const h = harness({
-      respond: (c) => (c.url === 'https://api.cookiemunch.net/.well-known/forgedeck-embed.json' ? { status: 200, body: CM } : undefined),
+      respond: (c) => (c.url === 'https://api.cookiemunch.net/.well-known/cookiemunch-embed.json' ? { status: 200, body: CM } : undefined),
     });
     expect(await run(['csp', '--merge', 'cookiemunch,atlas'], h.io)).toBe(1);
-    // Each product's own name first, on each host; the suite-named path last.
+    // Each product only under its own name, apex then API host: no suite-named fallback.
     expect(h.calls.map((c) => c.url)).toEqual([
       'https://cookiemunch.net/.well-known/cookiemunch-embed.json',
       'https://api.cookiemunch.net/.well-known/cookiemunch-embed.json',
-      'https://cookiemunch.net/.well-known/forgedeck-embed.json',
-      'https://api.cookiemunch.net/.well-known/forgedeck-embed.json',
       'https://atlasauth.net/.well-known/atlas-embed.json',
       'https://api.atlasauth.net/.well-known/atlas-embed.json',
-      'https://atlasauth.net/.well-known/forgedeck-embed.json',
-      'https://api.atlasauth.net/.well-known/forgedeck-embed.json',
     ]);
     expect(h.out()).toContain('https://cdn.cookiemunch.net');
     expect(h.err()).toContain('atlas: no manifest');
@@ -101,8 +103,8 @@ describe('cookiemunch cookies: manifests and suggestions (CMU-X36, CMU-D15)', ()
               : c.url.startsWith('https://api.test/v1/sites/acme/cookies/presets/acmechat') ? { status: 200, body: { vendor: 'acmechat', removed: ['x'] } }
                 : undefined,
     });
-    expect(await run(['cookies', 'import-manifest', 'https://acme.example/.well-known/forgedeck-embed.json', '--site', 'acme', '--dry-run'], h.io)).toBe(0);
-    expect(h.calls[0]).toMatchObject({ method: 'PUT', url: 'https://api.test/v1/sites/acme/cookies/presets/custom?dryRun=1', body: { url: 'https://acme.example/.well-known/forgedeck-embed.json' } });
+    expect(await run(['cookies', 'import-manifest', 'https://acme.example/.well-known/acmechat-embed.json', '--site', 'acme', '--dry-run'], h.io)).toBe(0);
+    expect(h.calls[0]).toMatchObject({ method: 'PUT', url: 'https://api.test/v1/sites/acme/cookies/presets/custom?dryRun=1', body: { url: 'https://acme.example/.well-known/acmechat-embed.json' } });
     expect(await run(['cookies', 'suggestions', '--site', 'acme'], h.io)).toBe(0);
     expect(await run(['cookies', 'declare-suggestions', '--site', 'acme', '--names', '_ga,referalli_ctx'], h.io)).toBe(0);
     expect(h.calls[2]).toMatchObject({ method: 'POST', body: { names: ['_ga', 'referalli_ctx'] } });
