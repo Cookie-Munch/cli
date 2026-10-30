@@ -2,8 +2,9 @@
 
 Every published release, newest first. Dates are the day the version was cut.
 
-## Unreleased
+## 0.8.0 (2026-10-30)
 
+- Changed: `cookiemunch csp --merge` keeps a manifest's `'sha256-…'` / `'sha384-…'` / `'sha512-…'` hash sources as written, before the origins.
 - Removed: `cookiemunch csp --merge <product>` reads each product's manifest only under its own name (`/.well-known/<product>-embed.json`); the suite-wide fallback is gone.
 - Changed: a version 2 `provision` body names its block `stack` (the server still reads the former name).
 
