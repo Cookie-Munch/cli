@@ -150,7 +150,8 @@ Usage:
   cookiemunch cookies preset <vendor> --site <cbid> [--param k=v …] [--dry-run]
       Declare what that platform writes (cookies and browser storage), marked as
       declared by it; run again to re-sync. Atlas: --param frontendApiHost=auth.example.com
-      [--param crossSubdomainCookies=false]. Chatly: --param publicId=ch_web_… .
+      [--param crossSubdomainCookies=false] [--param publishableKey=pk_live_…]. Chatly:
+      --param publicId=ch_web_… [--param storage=deny] [--param tracking=false].
       Referral and affiliate presets (referalli, firstpromoter, partnerstack, tapfiliate, impact):
       [--param cookieDomain=.example.com] [--param cookieDays=60] [--param category=…];
       referalli [--param legacyName=false], impact [--param campaignId=…]. A row filed under a
@@ -340,7 +341,7 @@ function proposed(current: Record<string, unknown>, file: Record<string, unknown
 }
 
 /** This package's version, sent in the default User-Agent (a test pins it to package.json). */
-export const CLI_VERSION = '0.8.0';
+export const CLI_VERSION = '0.8.1';
 
 /** `COOKIEMUNCH_USER_AGENT`, else `cookiemunch-cli/<version>`. */
 function userAgent(io: CliIo): string {
