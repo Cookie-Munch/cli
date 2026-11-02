@@ -2,6 +2,10 @@
 
 Every published release, newest first. Dates are the day the version was cut.
 
+## 0.10.0 (2026-11-02)
+
+- Changed: `cookies declare --replace` keeps vendor-preset rows; remove a preset with its own command.
+
 ## 0.9.0 (2026-11-01)
 
 - Added: `cookiemunch site update --keep-old-domain` keeps the old domain as an alias during a move. Built on `@cookiemunch/sdk` 0.10.0.

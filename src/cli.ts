@@ -218,7 +218,7 @@ Usage:
       when a named product has not published a manifest (the rest are still merged).
   cookiemunch cookies diff|push <file> --site <cbid> [--replace] [--exit-code]
       Declarations as a file ({"cookies": [...]}), through the server's dry run. push applies
-      only when something differs; --replace also removes declarations the file leaves out.
+      only when something differs; --replace also removes your own declarations the file leaves out (preset rows stay).
   cookiemunch executors pull [<file>] | diff <file> | push <file> [--secret-env NAME]
       Connected systems as a file. The file never carries a secret: a new connection's API key
       comes from the environment variable --secret-env names.
@@ -342,7 +342,7 @@ function proposed(current: Record<string, unknown>, file: Record<string, unknown
 }
 
 /** This package's version, sent in the default User-Agent (a test pins it to package.json). */
-export const CLI_VERSION = '0.9.0';
+export const CLI_VERSION = '0.10.0';
 
 /** `COOKIEMUNCH_USER_AGENT`, else `cookiemunch-cli/<version>`. */
 function userAgent(io: CliIo): string {
