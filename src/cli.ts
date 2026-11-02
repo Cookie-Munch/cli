@@ -19,7 +19,7 @@
  *   cookiemunch executors health <id> [--limit <n>]
  *   cookiemunch rights-page pull|diff|push|publish --site <cbid> [<file>] [--base <updatedAt>] [--yes]
  *   cookiemunch scan         --site <cbid> [--wait] [--timeout <seconds>]
- *   cookiemunch cookies presets|preset|unpreset|delete-observed|purge-observed --site <cbid> …
+ *   cookiemunch cookies presets|preset|unpreset|delete-observed|purge-observed|translation|translate --site <cbid> …
  *   cookiemunch site update  --site <cbid> [--domain <host> [--keep-old-domain]] [--name <name>] [--aliases a,b] [--dry-run]
  *   cookiemunch site brand   --site <cbid> [--url <https URL> | <brand.json>] [--dry-run]
  *   cookiemunch health       [--site <cbid>] [--json] [--fail-on error|warning|never]
@@ -167,6 +167,12 @@ Usage:
       What to declare: the platforms detected on the site and each undeclared row.
   cookiemunch cookies declare-suggestions --site <cbid> [--names a,b] [--dry-run]
       Declare them: detected vendors' presets, then every other suggestion with a purpose.
+  cookiemunch cookies translation [status|connect|disconnect] --site <cbid> [--provider deepl|google] [--verify] [--yes]
+      The site's own translation account. connect reads the key from COOKIEMUNCH_TRANSLATION_KEY
+      (never a flag, so it stays out of shell history); --verify checks it first, sending no text.
+  cookiemunch cookies translate --site <cbid> [--languages de,fr] [--names a,b] [--dry-run]
+      Machine-translate the missing purposes of your own rows on that account (default: the
+      languages the site serves). Never overwrites a row's text. --dry-run calls no provider.
   cookiemunch cookies delete-observed <name> --site <cbid> [--dry-run]
       Remove every stored row of that name (a name the site never sets). A declaration stays.
   cookiemunch cookies purge-observed --site <cbid> --since <time> [--until <time>] [--dry-run]
@@ -276,7 +282,7 @@ interface Parsed {
   flags: Record<string, string | true>;
 }
 
-const BOOLEAN_FLAGS = new Set(['replace', 'exit-code', 'open', 'help', 'json', 'yes', 'strict', 'wait', 'canary', 'dry-run', 'clear-name', 'revoke-atlas-id-grant', 'with-cbid', 'without-cbid', 'cleanup']);
+const BOOLEAN_FLAGS = new Set(['replace', 'exit-code', 'open', 'help', 'json', 'yes', 'strict', 'wait', 'canary', 'dry-run', 'clear-name', 'revoke-atlas-id-grant', 'with-cbid', 'without-cbid', 'cleanup', 'verify']);
 
 export function parseArgs(argv: string[]): Parsed {
   const positional: string[] = [];
@@ -342,7 +348,7 @@ function proposed(current: Record<string, unknown>, file: Record<string, unknown
 }
 
 /** This package's version, sent in the default User-Agent (a test pins it to package.json). */
-export const CLI_VERSION = '0.10.0';
+export const CLI_VERSION = '0.11.0';
 
 /** `COOKIEMUNCH_USER_AGENT`, else `cookiemunch-cli/<version>`. */
 function userAgent(io: CliIo): string {
@@ -781,6 +787,40 @@ async function cookiesCommand(sub: string | undefined, p: Parsed, io: CliIo, cli
     const r = await client.sites.declareCookieSuggestions(cbid, names ? { names: names.split(',').map((n) => n.trim()).filter(Boolean) } : {}, dry);
     print(r);
     io.stderr(`${dry ? 'Would declare' : 'Declared'} ${r.declaredCount} row${r.declaredCount === 1 ? '' : 's'} and ${r.presetsApplied.length} preset${r.presetsApplied.length === 1 ? '' : 's'}.\n`);
+    return 0;
+  }
+  if (sub === 'translation') {
+    const cbid = requireSite(p, io);
+    const action = p.positional[2] ?? 'status';
+    if (action === 'status') {
+      print(await client.sites.translation(cbid));
+      return 0;
+    }
+    if (action === 'connect') {
+      const provider = str(p.flags, 'provider');
+      if (provider !== 'deepl' && provider !== 'google') throw new UsageError('--provider deepl or --provider google is required');
+      const key = io.env.COOKIEMUNCH_TRANSLATION_KEY;
+      if (!key) throw new UsageError('set COOKIEMUNCH_TRANSLATION_KEY to your provider API key');
+      print(await client.sites.connectTranslation(cbid, { provider, key }, p.flags.verify === true ? { verify: true } : undefined));
+      return 0;
+    }
+    if (action === 'disconnect') {
+      if (p.flags.yes !== true) throw new UsageError('cookies translation disconnect deletes the stored key: add --yes');
+      print(await client.sites.disconnectTranslation(cbid));
+      return 0;
+    }
+    throw new UsageError(`unknown cookies translation command: ${action}`);
+  }
+  if (sub === 'translate') {
+    const cbid = requireSite(p, io);
+    const list = (f: string) => str(p.flags, f)?.split(',').map((n) => n.trim()).filter(Boolean);
+    const languages = list('languages');
+    const names = list('names');
+    const r = await client.sites.translateCookies(cbid, { ...(languages ? { languages } : {}), ...(names ? { names } : {}) }, dry);
+    print(r);
+    for (const u of r.unsupported) io.stderr(`unsupported ${u.language}: ${u.reason}\n`);
+    for (const f of r.failed) io.stderr(`failed ${f.language}: ${f.error}\n`);
+    io.stderr(`${dry ? 'Would translate' : 'Translated'} ${r.translated} entr${r.translated === 1 ? 'y' : 'ies'} on ${r.rows} row${r.rows === 1 ? '' : 's'} (${r.characters} characters).\n`);
     return 0;
   }
   if (sub === 'delete-observed') {

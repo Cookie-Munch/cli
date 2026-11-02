@@ -2,6 +2,10 @@
 
 Every published release, newest first. Dates are the day the version was cut.
 
+## 0.11.0 (2026-11-02)
+
+- Added: `cookies translation [status|connect|disconnect]` and `cookies translate [--languages] [--names] [--dry-run]`.
+
 ## 0.10.0 (2026-11-02)
 
 - Changed: `cookies declare --replace` keeps vendor-preset rows; remove a preset with its own command.
