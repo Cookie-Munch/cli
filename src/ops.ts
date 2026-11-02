@@ -313,7 +313,8 @@ interface Bundle {
   cookies?: Array<Record<string, unknown> & { name: string }>;
   presets?: Array<{ vendor: string; params?: Record<string, unknown> }>;
   executors?: Array<Record<string, Json>>;
-  webhooks?: Array<{ url: string; events: string[]; cbid?: string | null }>;
+  /** `secretEnv` names an environment variable holding a signing secret you chose; the file never holds one. */
+  webhooks?: Array<{ url: string; events: string[]; cbid?: string | null; secretEnv?: string }>;
   rightsPage?: Record<string, unknown>;
   partners?: Array<{ partner: string; resource: string; scopes: string[]; externalId?: string; label?: string }>;
 }
@@ -326,8 +327,8 @@ interface PartPlan { part: Part; changes: number; detail: string[]; apply?: () =
  * One file for everything a site's privacy setup is (CMU-D12). `plan` asks the server's dry run of every part
  * and prints one combined diff; `apply` applies the parts in dependency order (site → config → cookies →
  * presets → rights page → executors → webhooks → partners), reads each back, and logs when.
- * No secret ever goes in the file: an executor's key comes from --secret-env, a new webhook's secret is
- * written to --secrets-out (0600) or the webhook is not created.
+ * No secret ever goes in the file: an executor's key comes from --secret-env, a new webhook's secret comes
+ * from the variable its `secretEnv` names, or is written to --secrets-out (0600), or the webhook is not created.
  */
 export async function bundleCommand(sub: 'plan' | 'apply', io: CliIo, client: CookieMunchClient, h: OpsHelpers): Promise<number> {
   const path = h.positional[1] ?? 'cookiemunch.json';
@@ -379,6 +380,7 @@ export async function bundleCommand(sub: 'plan' | 'apply', io: CliIo, client: Co
     plans.push({ part: 'executors', changes: n, detail, apply: async () => { await executorsFileCommand('push', io, client, { ...h, positional: ['executors', 'push', path], readJson: async () => ({ executors: b.executors }) }); return 'executors pushed'; } });
   }
   if (b.webhooks) {
+    for (const w of b.webhooks) if ('secret' in w) throw h.usage(`${path}: webhooks carry no secrets; name an environment variable with secretEnv`);
     const have = await client.webhooks.list();
     const missing = b.webhooks.filter((w) => !have.some((x) => x.url === w.url));
     const changed = b.webhooks.filter((w) => { const x = have.find((y) => y.url === w.url); return x && JSON.stringify([...x.events].sort()) !== JSON.stringify([...w.events].sort()); });
@@ -387,9 +389,14 @@ export async function bundleCommand(sub: 'plan' | 'apply', io: CliIo, client: Co
       detail: [...missing.map((w) => `+ ${w.url}`), ...changed.map((w) => `~ ${w.url} events`)],
       apply: async () => {
         const secretsOut = str(h, 'secrets-out');
-        if (missing.length && !secretsOut) throw h.usage('creating webhooks shows their signing secrets once: pass --secrets-out <file> (written 0600)');
+        for (const w of missing) if (w.secretEnv && !io.env[w.secretEnv]) throw h.usage(`${w.url}: secretEnv ${w.secretEnv} is not set`);
+        if (missing.some((w) => !w.secretEnv) && !secretsOut) throw h.usage('creating webhooks shows their signing secrets once: pass --secrets-out <file> (written 0600), or give each a secretEnv');
         const secrets: Record<string, string> = {};
-        for (const w of missing) { const s = await client.webhooks.create({ url: w.url, events: w.events, ...(w.cbid !== undefined ? { cbid: w.cbid } : {}) } as never); if (s.secret) secrets[w.url] = s.secret; }
+        for (const w of missing) {
+          const chosen = w.secretEnv ? io.env[w.secretEnv] : undefined;
+          const s = await client.webhooks.create({ url: w.url, events: w.events, ...(w.cbid !== undefined ? { cbid: w.cbid } : {}), ...(chosen ? { secret: chosen } : {}) } as never);
+          if (s.secret) secrets[w.url] = s.secret;
+        }
         for (const w of changed) { const x = have.find((y) => y.url === w.url)!; await client.webhooks.update(x.id, { events: w.events } as never); }
         if (secretsOut && Object.keys(secrets).length) await io.writeFile(secretsOut, `${JSON.stringify(secrets, null, 2)}\n`, 0o600);
         return `${missing.length} created, ${changed.length} updated`;

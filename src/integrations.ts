@@ -18,16 +18,17 @@ interface Helpers {
 
 const out = (io: CliIo, v: unknown) => io.stdout(`${JSON.stringify(v, null, 2)}\n`);
 
-/** `cookiemunch site update --site <cbid> [--domain d] [--name n | --clear-name] [--aliases a,b] [--dry-run]` */
+/** `cookiemunch site update --site <cbid> [--domain d [--keep-old-domain]] [--name n | --clear-name] [--aliases a,b] [--dry-run]` */
 export async function siteCommand(sub: string | undefined, io: CliIo, client: CookieMunchClient, h: Helpers, file?: string): Promise<number> {
   if (sub === 'brand') return brandCommand(io, client, h, file);
-  if (sub !== 'update') throw h.usage('usage: cookiemunch site update --site <cbid> [--domain <host>] [--name <name>] [--aliases a,b] [--dry-run]');
+  if (sub !== 'update') throw h.usage('usage: cookiemunch site update --site <cbid> [--domain <host> [--keep-old-domain]] [--name <name>] [--aliases a,b] [--dry-run]');
   const cbid = h.requireSite();
   const domain = h.flag('domain');
   const name = h.flag('name');
   const aliases = h.flag('aliases');
-  const patch: { domain?: string; name?: string | null; aliases?: string[] } = {};
+  const patch: { domain?: string; name?: string | null; aliases?: string[]; keepOldDomain?: boolean } = {};
   if (typeof domain === 'string') patch.domain = domain;
+  if (h.flag('keep-old-domain') === true) patch.keepOldDomain = true;
   if (h.flag('clear-name') === true) patch.name = null;
   else if (typeof name === 'string') patch.name = name;
   if (typeof aliases === 'string') patch.aliases = aliases.split(',').map((a) => a.trim()).filter(Boolean);

@@ -2,6 +2,12 @@
 
 Every published release, newest first. Dates are the day the version was cut.
 
+## 0.9.0 (2026-11-01)
+
+- Added: `cookiemunch site update --keep-old-domain` keeps the old domain as an alias during a move. Built on `@cookiemunch/sdk` 0.10.0.
+
+- Added: a webhook in `cookiemunch.json` may name `secretEnv`, an environment variable holding a signing secret you chose; that webhook needs no `--secrets-out`. A `secret` in the file is refused.
+
 ## 0.8.1 (2026-10-30)
 
 - Changed: `cookiemunch cookies preset --help` names Atlas's `publishableKey` and Chatly's `storage` and `tracking` params (`--param publishableKey=pk_live_…`, `--param storage=deny`, `--param tracking=false`).

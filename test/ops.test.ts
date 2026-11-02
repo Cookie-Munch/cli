@@ -148,4 +148,14 @@ describe('plan|apply cookiemunch.json (CMU-D12)', () => {
     expect(await run(['apply', 'b.json'], h.io)).toBe(2);
     expect(h.calls.some((c) => c.method === 'POST' && c.url.endsWith('/v1/webhooks'))).toBe(false);
   });
+
+  it('creates a webhook with the secret its secretEnv names, and never takes one from the file (Calendoro #14)', async () => {
+    const b3 = JSON.stringify({ site: { cbid: 'acme' }, webhooks: [{ url: 'https://h.example/new', events: ['consent.*'], secretEnv: 'HOOK_SECRET' }] });
+    const chosen = 'x'.repeat(40);
+    const h = harness({ files: { 'b.json': b3 }, env: { HOOK_SECRET: chosen }, respond: (c) => (c.method === 'POST' && c.url.endsWith('/v1/webhooks') ? { status: 201, body: { id: 'w2', url: 'https://h.example/new', events: ['consent.*'] } } : respond(c)) });
+    expect(await run(['apply', 'b.json'], h.io)).toBe(0);
+    expect(h.calls.find((c) => c.method === 'POST' && c.url.endsWith('/v1/webhooks'))!.body).toMatchObject({ events: ['consent.*'], secret: chosen });
+    const b4 = JSON.stringify({ site: { cbid: 'acme' }, webhooks: [{ url: 'https://h.example/new', events: ['consent.*'], secret: chosen }] });
+    expect(await run(['apply', 'b.json'], harness({ files: { 'b.json': b4 }, respond }).io)).toBe(2);
+  });
 });

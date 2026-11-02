@@ -20,7 +20,7 @@
  *   cookiemunch rights-page pull|diff|push|publish --site <cbid> [<file>] [--base <updatedAt>] [--yes]
  *   cookiemunch scan         --site <cbid> [--wait] [--timeout <seconds>]
  *   cookiemunch cookies presets|preset|unpreset|delete-observed|purge-observed --site <cbid> …
- *   cookiemunch site update  --site <cbid> [--domain <host>] [--name <name>] [--aliases a,b] [--dry-run]
+ *   cookiemunch site update  --site <cbid> [--domain <host> [--keep-old-domain]] [--name <name>] [--aliases a,b] [--dry-run]
  *   cookiemunch site brand   --site <cbid> [--url <https URL> | <brand.json>] [--dry-run]
  *   cookiemunch health       [--site <cbid>] [--json] [--fail-on error|warning|never]
  *   cookiemunch provision    <file> [--dry-run]
@@ -172,7 +172,7 @@ Usage:
   cookiemunch cookies purge-observed --site <cbid> --since <time> [--until <time>] [--dry-run]
       Remove every row a real visit first reported in that window (ISO-8601 or epoch ms).
       Crawled rows and declarations stay. Run with --dry-run first.
-  cookiemunch site update --site <cbid> [--domain <host>] [--name <name> | --clear-name]
+  cookiemunch site update --site <cbid> [--domain <host> [--keep-old-domain]] [--name <name> | --clear-name]
                           [--aliases <a,b>] [--dry-run]
       Rename or move a site. The cbid and consent ledger stay; a domain move clears
       verification. --dry-run prints the diff and its effects without saving.
@@ -244,7 +244,8 @@ Usage:
       One file for a site: {site, config, cookies, presets, executors, webhooks, rightsPage,
       partners}, no secrets. plan prints the server's dry run of every part ("No changes" when
       it matches); apply applies them in dependency order and logs each. New webhook secrets
-      go to --secrets-out (mode 0600).
+      go to --secrets-out (mode 0600), unless a webhook's secretEnv names a variable holding
+      one you chose.
   cookiemunch --version | version [--json]
       The CLI version; --json adds the API version the server documents.
 
@@ -341,7 +342,7 @@ function proposed(current: Record<string, unknown>, file: Record<string, unknown
 }
 
 /** This package's version, sent in the default User-Agent (a test pins it to package.json). */
-export const CLI_VERSION = '0.8.1';
+export const CLI_VERSION = '0.9.0';
 
 /** `COOKIEMUNCH_USER_AGENT`, else `cookiemunch-cli/<version>`. */
 function userAgent(io: CliIo): string {
