@@ -39,6 +39,7 @@ import { rightsPageCommand } from './rights-page.js';
 import { healthCommand, keysCommand, partnersCommand, provisionCommand, siteCommand } from './integrations.js';
 import { countBySeverity, formatDesignWarnings, summaryLine } from './design-warnings.js';
 import { cspCommand } from './csp.js';
+import { categoryTypes, offeredCategories, scanSourceFiles, skipDir, SOURCE_EXTENSIONS } from './source.js';
 import { bundleCommand, cookiesFileCommand, doctorCommand, dsarTestCommand, executorsFileCommand, keysExtraCommand, sandboxCommand, versionCommand, type OpsHelpers } from './ops.js';
 
 export const DEFAULT_BASE_URL = 'https://api.cookiemunch.net';
@@ -58,6 +59,8 @@ export interface CliIo {
    * absent, a command that needs confirmation refuses unless given --yes.
    */
   confirm?: (question: string) => Promise<boolean>;
+  /** Every file under `dir`, as paths relative to it, never walking into a directory `skip` names. */
+  listFiles?: (dir: string, skip: (dirName: string) => boolean) => Promise<string[]>;
 }
 
 export const USAGE = `cookiemunch — Cookie Munch from the command line
@@ -252,6 +255,15 @@ Usage:
       it matches); apply applies them in dependency order and logs each. New webhook secrets
       go to --secrets-out (mode 0600), unless a webhook's secretEnv names a variable holding
       one you chose.
+  cookiemunch scan-source [dir] [--json]
+      The first-party cookie and storage names your code sets (document.cookie, cookies.set,
+      cookies().set, localStorage/sessionStorage.setItem in .js/.ts/.jsx/.tsx/.vue/.svelte/.html;
+      node_modules, dist and .next are skipped), as cookiemunch.json cookie rows with the
+      category left null for you to choose. Static only: names built at run time are missed.
+      Needs no API key.
+  cookiemunch types --site <cbid> [--out <file>]
+      Write a .d.ts naming the site's categories (type CookieMunchCategory) that narrows the
+      category arguments of @cookiemunch/react to them (default cookiemunch-categories.d.ts).
   cookiemunch --version | version [--json]
       The CLI version; --json adds the API version the server documents.
 
@@ -348,7 +360,7 @@ function proposed(current: Record<string, unknown>, file: Record<string, unknown
 }
 
 /** This package's version, sent in the default User-Agent (a test pins it to package.json). */
-export const CLI_VERSION = '0.11.0';
+export const CLI_VERSION = '0.12.0';
 
 /** `COOKIEMUNCH_USER_AGENT`, else `cookiemunch-cli/<version>`. */
 function userAgent(io: CliIo): string {
@@ -907,6 +919,17 @@ export async function run(argv: string[], io: CliIo): Promise<number> {
       return 1;
     }
   }
+  // A static read of local files: no key.
+  if (cmd === 'scan-source') {
+    if (!io.listFiles) { io.stderr('scan-source needs a file system\n'); return 2; }
+    const dir = p.positional[1] ?? '.';
+    const paths = (await io.listFiles(dir, skipDir)).filter((f) => SOURCE_EXTENSIONS.some((e) => f.endsWith(e)) && !f.split(/[\\/]/).some(skipDir));
+    const rows = scanSourceFiles(await Promise.all(paths.sort().map(async (path) => ({ path, text: await io.readFile(`${dir.replace(/\/+$/, '')}/${path}`) }))));
+    if (p.flags.json === true) io.stdout(`${JSON.stringify({ cookies: rows }, null, 2)}\n`);
+    else for (const r of rows) io.stdout(`${r.name}\t${r.type}\t${r.files.join(', ')}\n`);
+    io.stderr(`${rows.length} name${rows.length === 1 ? '' : 's'} in ${paths.length} file${paths.length === 1 ? '' : 's'}. Declare them with a category (cookies push), or --json for the rows.\n`);
+    return 0;
+  }
   // Every embed manifest is public: csp needs no key.
   if (cmd === 'csp') {
     try {
@@ -955,6 +978,19 @@ export async function run(argv: string[], io: CliIo): Promise<number> {
     if (cmd === 'sandbox') return await sandboxCommand(sub, io, client, ops);
     if (cmd === 'plan' || cmd === 'apply') return await bundleCommand(cmd, io, client, ops);
     if (cmd === 'config') return await configCommand(sub, p, io, client);
+    if (cmd === 'types') {
+      const cbid = requireSite(p, io);
+      const cats = offeredCategories((await client.sites.getConfig(cbid)) as Record<string, unknown>);
+      const out = str(p.flags, 'out') ?? 'cookiemunch-categories.d.ts';
+      // --for react,embed: which packages to augment (each must be installed, or TypeScript rejects the augmentation).
+      const MODULES: Record<string, string> = { react: '@cookiemunch/react', embed: '@cookiemunch/sdk/embed' };
+      const wanted = (str(p.flags, 'for') ?? 'react').split(',').map((x) => x.trim()).filter(Boolean);
+      const bad = wanted.filter((w) => !MODULES[w]);
+      if (bad.length) { io.stderr(`--for takes react and/or embed, not ${bad.join(', ')}\n`); return 2; }
+      await io.writeFile(out, categoryTypes(cbid, cats, wanted.map((w) => MODULES[w]!)));
+      io.stderr(`Wrote ${out}: ${cats.join(', ')}.\n`);
+      return 0;
+    }
     if (cmd === 'preview') return await previewCommand(p, io, client);
     if (cmd === 'scan') return await scanCommand(p, io, client);
     if (cmd === 'consent-sync') return await consentSyncCommand(sub, p, io, client);

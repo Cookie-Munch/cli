@@ -2,6 +2,11 @@
 
 Every published release, newest first. Dates are the day the version was cut.
 
+## 0.12.0 (2026-11-03)
+
+- Added: `scan-source [dir] [--json]`: the first-party cookie and storage names your source sets, as cookiemunch.json cookie rows (category null); skips node_modules, dist and .next; no key.
+- Added: `types --site <cbid> [--out file]`: a `.d.ts` of the site's categories (`CookieMunchCategory`) that narrows `@cookiemunch/react`'s category arguments.
+
 ## 0.11.0 (2026-11-02)
 
 - Added: `cookies translation [status|connect|disconnect]` and `cookies translate [--languages] [--names] [--dry-run]`.

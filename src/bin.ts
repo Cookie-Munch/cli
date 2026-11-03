@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /** The `cookiemunch` executable: real I/O around run() (see cli.ts). */
 
-import { readFile, writeFile } from 'node:fs/promises';
+import { readdir, readFile, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline/promises';
 import { run } from './cli.js';
@@ -38,6 +38,19 @@ function openUrl(url: string): Promise<void> {
   });
 }
 
+/** Files under `dir`, relative to it, never entering a directory `skip` names. */
+async function listFiles(dir: string, skip: (name: string) => boolean): Promise<string[]> {
+  const out: string[] = [];
+  const walk = async (rel: string): Promise<void> => {
+    for (const e of await readdir(rel ? `${dir}/${rel}` : dir, { withFileTypes: true })) {
+      const path = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory()) { if (!skip(e.name)) await walk(path); } else if (e.isFile()) out.push(path);
+    }
+  };
+  await walk('');
+  return out;
+}
+
 run(process.argv.slice(2), {
   env: process.env,
   fetch: globalThis.fetch,
@@ -46,6 +59,7 @@ run(process.argv.slice(2), {
   readFile: (p) => readFile(p, 'utf8'),
   writeFile: (p, d, mode) => writeFile(p, d, { encoding: 'utf8', ...(mode !== undefined ? { mode } : {}) }),
   openUrl,
+  listFiles,
   ...(process.stdin.isTTY && process.stderr.isTTY ? { confirm } : {}),
 }).then(
   (code) => {

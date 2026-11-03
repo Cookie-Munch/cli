@@ -15,13 +15,16 @@ cookiemunch config push --site acme-com-9f3k cookiemunch.json
 
 ## Commands
 
-`config pull|diff|push|validate`, `preview`, `scan`, `cookies presets|preset|unpreset|retire|unretire|delete-observed`, `rights-page pull|diff|push|publish`, `executors ...`, `site`, `health`, `keys`, `partners`, `provision`. Run `cookiemunch --help` for every flag.
+`config pull|diff|push|validate`, `preview`, `scan`, `cookies presets|preset|unpreset|retire|unretire|delete-observed`, `rights-page pull|diff|push|publish`, `executors ...`, `site`, `health`, `keys`, `partners`, `provision`, `doctor`, `scan-source [dir]` (cookie and storage names your source sets, as cookiemunch.json rows; no key), `types [--out file] [--for react,embed]` (a `.d.ts` of the site's categories for `@cookiemunch/react` and/or `@cookiemunch/sdk/embed`). Run `cookiemunch --help` for every flag.
+
+`cookiemunch doctor [--site <cbid>] [--org <id>]` checks your setup in one go: the key (and whose organisation it belongs to, against `--org` or `COOKIEMUNCH_ORG`), its expiry, the CLI version against the latest, and integration health. It exits `1` when a check fails, so it works as a CI step.
 
 ## Environment
 
 | Variable | Required | Description |
 | --- | --- | --- |
-| `COOKIEMUNCH_API_KEY` | yes | An API key (`fck_...`). |
+| `COOKIEMUNCH_API_KEY` | yes | An API key (`cookiemunch_live_...`). |
+| `COOKIEMUNCH_ORG` | no | The organisation `doctor` checks the key against when no `--org` is given. |
 | `COOKIEMUNCH_SITE` | no | The site (`cbid`) used when a command is given no `--site`. |
 | `COOKIEMUNCH_BASE_URL` | no | The API origin. Default `https://api.cookiemunch.net`. |
 | `COOKIEMUNCH_USER_AGENT` | no | The `User-Agent` sent to the API. Default `cookiemunch-cli/<version>`. |

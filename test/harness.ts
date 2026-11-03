@@ -52,6 +52,8 @@ export function harness(opts: { env?: Record<string, string>; files?: Record<str
     openUrl: async (u) => {
       opened.push(u);
     },
+    // Every file under dir, skipped directories included: the command must filter them itself.
+    listFiles: async (dir) => Object.keys(opts.files ?? {}).filter((k) => k.startsWith(`${dir}/`)).map((k) => k.slice(dir.length + 1)),
   };
   return { io, calls, out: () => out.join(''), err: () => err.join(''), written, opened };
 }
