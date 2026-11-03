@@ -2,6 +2,15 @@
 
 Every published release, newest first. Dates are the day the version was cut.
 
+## 0.13.0 (2026-11-03)
+
+- Added: the `seolyticize` preset and the `none` storage type, with `@cookiemunch/sdk` 0.16.0.
+
+## 0.12.1 (2026-11-03)
+
+- Added: `doctor --site <cbid>` warns `preset_incomplete` for each applied preset that misses names the site writes.
+- Added: `provision` passes `atlas.connect: true` through (step `atlas.connect`).
+
 ## 0.12.0 (2026-11-03)
 
 - Added: `scan-source [dir] [--json]`: the first-party cookie and storage names your source sets, as cookiemunch.json cookie rows (category null); skips node_modules, dist and .next; no key.

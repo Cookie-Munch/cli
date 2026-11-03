@@ -148,7 +148,7 @@ Usage:
 
   cookiemunch cookies presets --site <cbid>
       The declaration presets (atlas, forumulate, chatly, cookiemunch, referalli, firstpromoter,
-      partnerstack, tapfiliate, impact; referally is the deprecated old name of referalli): what each takes,
+      partnerstack, tapfiliate, impact, seolyticize; referally is the deprecated old name of referalli): what each takes,
       what it declared on this site, and whether the vendor's own manifest exists yet.
   cookiemunch cookies preset <vendor> --site <cbid> [--param k=v …] [--dry-run]
       Declare what that platform writes (cookies and browser storage), marked as
@@ -360,7 +360,7 @@ function proposed(current: Record<string, unknown>, file: Record<string, unknown
 }
 
 /** This package's version, sent in the default User-Agent (a test pins it to package.json). */
-export const CLI_VERSION = '0.12.1';
+export const CLI_VERSION = '0.13.0';
 
 /** `COOKIEMUNCH_USER_AGENT`, else `cookiemunch-cli/<version>`. */
 function userAgent(io: CliIo): string {
@@ -723,7 +723,7 @@ async function scanCommand(p: Parsed, io: CliIo, client: CookieMunchClient): Pro
   return 0;
 }
 
-const PRESET_VENDORS = ['atlas', 'forumulate', 'chatly', 'cookiemunch', 'referalli', 'firstpromoter', 'partnerstack', 'tapfiliate', 'impact'] as const;
+const PRESET_VENDORS = ['atlas', 'forumulate', 'chatly', 'cookiemunch', 'referalli', 'firstpromoter', 'partnerstack', 'tapfiliate', 'impact', 'seolyticize'] as const;
 /** Old preset names still accepted (the server answers them with a Deprecation header). */
 const PRESET_ALIASES: Record<string, Vendor> = { referally: 'referalli' };
 type Vendor = (typeof PRESET_VENDORS)[number];
