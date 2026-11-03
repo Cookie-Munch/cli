@@ -229,6 +229,16 @@ export async function doctorCommand(io: CliIo, client: CookieMunchClient, h: Ops
       checks.push({ check: 'integration health', ok: null, detail: (e as Error).message });
     }
   }
+  if (site) {
+    try {
+      // A preset the site writes more than it declares (preset_incomplete): a warning, not a failure.
+      for (const p of (await client.sites.cookiePresets(site)).presets) {
+        if (p.applied) checks.push({ check: `preset ${p.vendor}`, ok: p.incomplete?.length ? null : true, detail: p.incomplete?.length ? `preset_incomplete: seen but not declared: ${p.incomplete.join(', ')}` : `${p.declared.length} declared` });
+      }
+    } catch (e) {
+      checks.push({ check: 'presets', ok: null, detail: (e as Error).message });
+    }
+  }
   if (json(h)) print(io, { ok: checks.every((c) => c.ok !== false), checks });
   else for (const c of checks) io.stdout(`${c.ok === true ? 'ok  ' : c.ok === false ? 'FAIL' : '--  '} ${c.check}: ${c.detail}\n`);
   return checks.some((c) => c.ok === false) ? 1 : 0;

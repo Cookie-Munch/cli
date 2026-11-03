@@ -111,6 +111,25 @@ describe('doctor (CMU-D11)', () => {
     expect(await run(['doctor', '--org', 'org_b'], wrong.io)).toBe(1);
     expect(wrong.out()).toContain("this key's org is org_a, not org_b");
   });
+
+  it('with --site names a preset the site writes more than it declares, as a warning, not a failure', async () => {
+    const h = harness({
+      respond: (c) => {
+        if (c.url.endsWith('/v1/me')) return { status: 200, body: { orgId: 'org_a', keyPrefix: 'p' } };
+        if (c.url.endsWith('/v1/keys/self')) return { status: 200, body: { prefix: 'p' } };
+        if (c.url.includes('registry.npmjs.org')) return { status: 200, body: { version: pkg.version } };
+        if (c.url.includes('/v1/integration-health')) return { status: 200, body: { ok: true, counts: { error: 0, warning: 0, notChecked: 0 }, checks: [] } };
+        if (c.url.endsWith('/v1/sites/acme/cookies/presets')) return { status: 200, body: { presets: [
+          { vendor: 'atlas', applied: true, declared: ['__atlas_rt'], incomplete: ['__session'], params: [], manifest: {} },
+          { vendor: 'chatly', applied: false, declared: [], params: [], manifest: {} },
+        ] } };
+        return undefined;
+      },
+    });
+    expect(await run(['doctor', '--site', 'acme'], h.io)).toBe(0);
+    expect(h.out()).toContain('--   preset atlas: preset_incomplete: seen but not declared: __session');
+    expect(h.out()).not.toContain('preset chatly');
+  });
 });
 
 describe('keys vend (CMU-S02)', () => {
