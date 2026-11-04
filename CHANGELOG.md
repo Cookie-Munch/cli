@@ -2,6 +2,10 @@
 
 Every published release, newest first. Dates are the day the version was cut.
 
+## 0.15.0 (2026-11-04)
+
+- Added: `plan` and `config push` print `not applied: <path> (the server's dry run does not keep it)` for any field sent that the server would not store; `plan --exit-code` then exits 1.
+
 ## 0.14.0 (2026-11-04)
 
 - Added: `config translate --site <cbid> [--languages] [--dry-run]`: the site's own banner and category copy, on its connected translation account.

@@ -49,6 +49,21 @@ function join(path: string, key: string): string {
   return path ? `${path}.${key}` : key;
 }
 
+/**
+ * Paths a write sent that the server's answer (the saved config, or a dry run's `config`) does not
+ * carry: the server dropped them, so a diff alone would report "No changes" for a field never applied.
+ * A `null` (a removal) and the read-only fields are not expected back.
+ */
+export function notKept(sent: Record<string, unknown>, saved: unknown, path = ''): string[] {
+  return Object.entries(sent).flatMap(([k, v]) => {
+    if (v === null || (!path && (READ_ONLY_CONFIG_FIELDS as readonly string[]).includes(k))) return [];
+    const p = join(path, k);
+    const s = isPlainObject(saved) ? saved[k] : undefined;
+    if (s === undefined) return [p];
+    return isPlainObject(v) && isPlainObject(s) ? notKept(v, s, p) : [];
+  });
+}
+
 /** Every leaf that differs between `before` and `after`, in a stable order. */
 export function diffJson(before: unknown, after: unknown, path = ''): Change[] {
   if (isPlainObject(before) && isPlainObject(after)) {

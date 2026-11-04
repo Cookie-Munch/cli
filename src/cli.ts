@@ -35,7 +35,7 @@
  */
 
 import { createCookieMunch, CookieMunchApiError, exchangeOperatorToken, mintConsentSyncToken, runExecutorConformance, type CookieMunchClient } from '@cookiemunch/sdk';
-import { diffJson, formatChanges, isPlainObject, mergeLikeServer, withoutReadOnly, type Change, type Json } from './diff.js';
+import { diffJson, formatChanges, isPlainObject, mergeLikeServer, notKept, withoutReadOnly, type Change, type Json } from './diff.js';
 import { rightsPageCommand } from './rights-page.js';
 import { healthCommand, keysCommand, partnersCommand, provisionCommand, siteCommand } from './integrations.js';
 import { countBySeverity, formatDesignWarnings, summaryLine } from './design-warnings.js';
@@ -365,7 +365,7 @@ function proposed(current: Record<string, unknown>, file: Record<string, unknown
 }
 
 /** This package's version, sent in the default User-Agent (a test pins it to package.json). */
-export const CLI_VERSION = '0.14.0';
+export const CLI_VERSION = '0.15.0';
 
 /** `COOKIEMUNCH_USER_AGENT`, else `cookiemunch-cli/<version>`. */
 function userAgent(io: CliIo): string {
@@ -479,6 +479,7 @@ async function configCommand(sub: string | undefined, p: Parsed, io: CliIo, clie
       ? await client.sites.putConfig(cbid, { ...file, cbid } as never)
       : await client.sites.patchConfig(cbid, file as never)) as { designWarnings?: unknown };
     io.stderr(`Applied ${changes.length} change${changes.length === 1 ? '' : 's'} to ${cbid}.\n`);
+    for (const d of notKept(file as Record<string, unknown>, saved)) io.stderr(`not applied: ${d} (the server did not keep it)\n`);
     const found = Array.isArray(saved?.designWarnings) ? (saved.designWarnings as Parameters<typeof formatDesignWarnings>[0]) : [];
     if (p.flags.json === true) io.stdout(`${JSON.stringify({ cbid, applied: changes, designWarnings: found }, null, 2)}\n`);
     if (found.length) io.stderr(`${formatDesignWarnings(found)}\n${summaryLine(found)}\n`);

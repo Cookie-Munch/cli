@@ -160,6 +160,14 @@ describe('plan|apply cookiemunch.json (CMU-D12)', () => {
     expect(h.calls.filter((c) => c.method !== 'GET' && !c.url.includes('dryRun')).length).toBe(0);
   });
 
+  it('plan reports a config field the server\'s dry run does not keep, instead of No changes', async () => {
+    const b = JSON.stringify({ site: { cbid: 'acme' }, config: { consent: { identifyIssuers: [{ issuer: 'https://forumulate.com', jwksUrl: 'https://forumulate.com/k' }] } } });
+    const h = harness({ files: { 'b.json': b }, respond: (c) => (c.url.includes('/config') ? { status: 200, body: { dryRun: true, diff: [], config: { cbid: 'acme', consent: { version: 1 } } } } : respond(c)) });
+    expect(await run(['plan', 'b.json', '--exit-code'], h.io)).toBe(1);
+    expect(h.out()).toContain("not applied: consent.identifyIssuers (the server's dry run does not keep it)");
+    expect(h.err()).not.toContain('No changes: all');
+  });
+
   it('refuses an unknown part, and refuses to create a webhook without --secrets-out', async () => {
     expect(await run(['plan', 'x.json'], harness({ files: { 'x.json': JSON.stringify({ site: { cbid: 'acme' }, nope: {} }) } }).io)).toBe(2);
     const b2 = JSON.stringify({ site: { cbid: 'acme' }, webhooks: [{ url: 'https://h.example/new', events: ['consent.recorded'] }] });

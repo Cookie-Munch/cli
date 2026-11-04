@@ -16,7 +16,7 @@
 
 import type { CookieMunchClient, DsarExecutor } from '@cookiemunch/sdk';
 import type { CliIo } from './cli.js';
-import { diffJson, formatChanges, type Change, type Json } from './diff.js';
+import { diffJson, formatChanges, notKept, type Change, type Json } from './diff.js';
 
 export interface OpsHelpers {
   requireSite(): string;
@@ -331,7 +331,7 @@ interface Bundle {
 
 const PARTS = ['site', 'config', 'cookies', 'presets', 'rightsPage', 'executors', 'webhooks', 'partners'] as const;
 type Part = (typeof PARTS)[number];
-interface PartPlan { part: Part; changes: number; detail: string[]; apply?: () => Promise<string> }
+interface PartPlan { part: Part; changes: number; detail: string[]; notApplied?: string[]; apply?: () => Promise<string> }
 
 /**
  * One file for everything a site's privacy setup is (CMU-D12). `plan` asks the server's dry run of every part
@@ -358,7 +358,8 @@ export async function bundleCommand(sub: 'plan' | 'apply', io: CliIo, client: Co
   if (b.config) {
     const r = await client.sites.dryRunConfig(cbid, b.config as never, { mode: 'patch' });
     const diff = r.diff ?? [];
-    plans.push({ part: 'config', changes: diff.length, detail: diff.map((d) => `${d.path}: ${JSON.stringify(d.from)} → ${JSON.stringify(d.to)}`), apply: async () => { await client.sites.patchConfig(cbid, b.config as never); return 'config patched'; } });
+    const dropped = r.config ? notKept(b.config as Record<string, unknown>, r.config) : [];
+    plans.push({ part: 'config', changes: diff.length, detail: diff.map((d) => `${d.path}: ${JSON.stringify(d.from)} → ${JSON.stringify(d.to)}`), ...(dropped.length ? { notApplied: dropped } : {}), apply: async () => { await client.sites.patchConfig(cbid, b.config as never); return 'config patched'; } });
   }
   if (b.cookies) {
     const r = await client.sites.declareCookies(cbid, b.cookies as never, { dryRun: true });
@@ -425,9 +426,12 @@ export async function bundleCommand(sub: 'plan' | 'apply', io: CliIo, client: Co
     else for (const p of plans) {
       io.stdout(`${p.part}: ${p.changes ? `${p.changes} change(s)` : 'No changes'}\n`);
       for (const d of p.detail) io.stdout(`  ${d}\n`);
+      for (const d of p.notApplied ?? []) io.stdout(`  not applied: ${d} (the server's dry run does not keep it)\n`);
     }
-    if (!json(h)) io.stderr(total ? `${total} change(s) in ${plans.filter((p) => p.changes).length} part(s). Apply with: cookiemunch apply ${path}\n` : `No changes: all ${plans.length} part(s) match.\n`);
-    return total && h.flag('exit-code') === true ? 1 : 0;
+    const unapplied = plans.reduce((n, p) => n + (p.notApplied?.length ?? 0), 0);
+    if (!json(h)) io.stderr(total ? `${total} change(s) in ${plans.filter((p) => p.changes).length} part(s). Apply with: cookiemunch apply ${path}\n` : unapplied ? '' : `No changes: all ${plans.length} part(s) match.\n`);
+    if (unapplied && !json(h)) io.stderr(`${unapplied} field(s) in ${path} would not be applied.\n`);
+    return (total || unapplied) && h.flag('exit-code') === true ? 1 : 0;
   }
   const log: Array<{ part: Part; at: string; result: string }> = [];
   for (const p of plans) {
