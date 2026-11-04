@@ -2,6 +2,10 @@
 
 Every published release, newest first. Dates are the day the version was cut.
 
+## 0.14.0 (2026-11-04)
+
+- Added: `config translate --site <cbid> [--languages] [--dry-run]`: the site's own banner and category copy, on its connected translation account.
+
 ## 0.13.0 (2026-11-03)
 
 - Added: the `seolyticize` preset and the `none` storage type, with `@cookiemunch/sdk` 0.16.0.

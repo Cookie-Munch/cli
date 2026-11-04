@@ -5,6 +5,7 @@
  *   cookiemunch config diff  --site <cbid> <file> [--replace] [--exit-code]
  *   cookiemunch config push  --site <cbid> <file> [--replace] [--strict]
  *   cookiemunch config validate --site <cbid> <file> [--replace] [--strict]
+ *   cookiemunch config translate --site <cbid> [--languages de,fr] [--dry-run]
  *   cookiemunch preview      --site <cbid> [--url <url>] [--region eu] [--lang de] [--ttl 900] [--open]
  *   cookiemunch executors test <id> --email <email> [--operation locate]
  *   cookiemunch executors webhook-test <id> --headers-file <json> --body-file <file>
@@ -83,6 +84,10 @@ Usage:
       all more prominent than Reject all (colour, size, placement, copy, custom CSS)?
       Merged over the stored config like push; --replace checks it as sent. --strict
       exits 1 when there is any warning (notices never fail).
+  cookiemunch config translate --site <cbid> [--languages de,fr] [--dry-run]
+      Machine-translate your own banner and category copy into the languages it lacks, on the
+      site's connected translation account (see cookies translation). Never overwrites text a
+      person wrote. --dry-run calls no provider.
   cookiemunch preview --site <cbid> [--url <page>] [--region <eu|de|us-ca…>] [--lang <de…>]
                       [--ttl <seconds>] [--open]
       Print (and with --open, open) a link showing the banner as a visitor in that
@@ -360,7 +365,7 @@ function proposed(current: Record<string, unknown>, file: Record<string, unknown
 }
 
 /** This package's version, sent in the default User-Agent (a test pins it to package.json). */
-export const CLI_VERSION = '0.13.0';
+export const CLI_VERSION = '0.14.0';
 
 /** `COOKIEMUNCH_USER_AGENT`, else `cookiemunch-cli/<version>`. */
 function userAgent(io: CliIo): string {
@@ -428,6 +433,16 @@ async function configCommand(sub: string | undefined, p: Parsed, io: CliIo, clie
     } else {
       io.stdout(text);
     }
+    return 0;
+  }
+  if (sub === 'translate') {
+    const languages = str(p.flags, 'languages')?.split(',').map((n) => n.trim()).filter(Boolean);
+    const dry = p.flags['dry-run'] === true;
+    const r = await client.sites.translateConfig(cbid, languages ? { languages } : {}, dry ? { dryRun: true } : undefined);
+    io.stdout(`${JSON.stringify(r, null, 2)}\n`);
+    for (const u of r.unsupported) io.stderr(`unsupported ${u.language}: ${u.reason}\n`);
+    for (const f of r.failed) io.stderr(`failed ${f.language}: ${f.error}\n`);
+    io.stderr(`${dry ? 'Would translate' : 'Translated'} ${r.translated} entr${r.translated === 1 ? 'y' : 'ies'} (${r.characters} characters).\n`);
     return 0;
   }
   if (sub === 'validate') {
