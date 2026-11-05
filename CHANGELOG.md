@@ -2,6 +2,10 @@
 
 Every published release, newest first. Dates are the day the version was cut.
 
+## 0.17.1 (2026-11-05)
+
+- Fixed: a refused mint prints its reason and code (the API answers 424). doctor --site fails on a site that does not exist, and doctor and dsar test refuse flags they would ignore. init stops before creating a site when --out is for another one. dsar test --site files for that site. connect --defer prints the API warning, the dry-run warning is plain text, the default system name skips api and www, and a wrong key with --base-url gets a fix line. --fix-plan gives one step per action.
+
 ## 0.17.0 (2026-11-05)
 
 - `executors connect` checks the key first: a refused key stores nothing and exits 1. New: `--no-verify`, `--base-url`, `--system`; `--defer` now registers a pending connection. An existing connection is named, with a command that can succeed.

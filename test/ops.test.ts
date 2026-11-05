@@ -2,7 +2,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { run, CLI_VERSION, USAGE } from '../src/cli.js';
-import { parseTtl } from '../src/ops.js';
+import { parseTtl, systemFromUrl } from '../src/ops.js';
 import { harness, type Call } from './harness.js';
 
 const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string };
@@ -196,7 +196,7 @@ describe('executors connect (one route)', () => {
   });
 
   it('a refused mint ends in the human step and the command to run after it', async () => {
-    const h = harness({ respond: (c) => (c.url.includes('/v1/dsar/executors') ? { status: 502, body: { error: 'Chatly answered 403 (no_attributable_owner)', code: 'partner_mint_failed', humanStep: 'sign in to chatly' } } : undefined) as never });
+    const h = harness({ respond: (c) => (c.url.includes('/v1/dsar/executors') ? { status: 424, body: { error: 'Chatly answered 403 (no_attributable_owner)', code: 'partner_mint_failed', humanStep: 'sign in to chatly' } } : undefined) as never });
     expect(await run(['executors', 'connect', 'chatly', '--site', 'c1'], h.io)).toBe(1);
     expect(h.err()).toMatch(/Do this: sign in to chatly/);
     expect(h.err()).toMatch(/--key-env CHATLY_KEY/);
@@ -380,5 +380,76 @@ describe('ForgeDeck retest: commands that said success', () => {
     const h = harness({ respond: ((c: Call) => (c.url.includes('/v1/sandbox') ? { status: 403, body: { error: 'insufficient_scope', message: 'missing required scope: orgs:create', code: 'forbidden' } } : undefined)) as never });
     expect(await run(['sandbox', 'create', '--key-name', 'x'], h.io)).toBe(1);
     expect(h.err()).toMatch(/API error 403 \(forbidden\): missing required scope: orgs:create/);
+  });
+});
+
+describe('the second retest', () => {
+  const sites = (c: Call) => (c.url.endsWith('/v1/sites') && c.method === 'GET' ? { status: 200, body: [{ cbid: 'a1', domain: 'a.example' }] } : undefined);
+
+  it('doctor fails on a site that does not exist; a check that could not run still does not', async () => {
+    const missing = harness({ respond: (c) => (c.url.includes('nope') ? { status: 404, body: { error: 'site not found' } } : undefined) as never });
+    expect(await run(['doctor', '--site', 'nope', '--fix-plan'], missing.io)).toBe(1);
+    expect(missing.out()).toContain('no site in this organisation has the cbid "nope"');
+    expect(missing.out()).not.toContain('Nothing left to do');
+    const down = harness({ respond: (c) => (c.url.includes('health') ? { status: 500, body: { error: 'boom' } } : c.url.endsWith('/v1/me') ? { status: 200, body: { orgId: 'o', keyPrefix: 'p' } } : c.url.endsWith('/v1/keys/self') ? { status: 200, body: { prefix: 'p' } } : c.url.includes('registry.npmjs.org') ? { status: 200, body: { version: pkg.version } } : c.url.includes('/presets') ? { status: 200, body: { presets: [] } } : undefined) as never });
+    expect(await run(['doctor', '--site', 'acme'], down.io)).toBe(0);
+  });
+
+  it('doctor refuses a flag it would ignore', async () => {
+    const h = harness();
+    expect(await run(['doctor', '--out', 'x.json'], h.io)).toBe(2);
+  });
+
+  it('--fix-plan gives one step per action, naming every site, and drops the org as a subject', async () => {
+    const respond = (c: Call) => {
+      if (c.url.endsWith('/v1/me')) return { status: 200, body: { orgId: 'o1', unscoped: true, rights: { warningDetails: [
+        { message: 'm', fix: 'PUT /v1/org/mail-provider, then POST /v1/org/mail-provider/test.' },
+        { message: 'm', fix: 'PUT /v1/org/controller.', cbids: ['a1', 'b1'] },
+        { message: 'm', fix: 'PUT /v1/org/controller, or send cbid on every request.' },
+      ] } } };
+      if (c.url.includes('health')) return { status: 200, body: { ok: false, counts: { error: 1, warning: 0 }, checks: [
+        { ok: false, subject: 'o1', fixHint: 'PUT /v1/org/mail-provider, then POST /v1/org/mail-provider/test.' },
+        { ok: false, subject: 'a1', fixHint: 'Connect and test a mail provider (PUT /v1/org/mail-provider, POST /v1/org/mail-provider/test), or set those to "manual_review" (PATCH /v1/sites/a1/rights-page).' },
+        { ok: false, subject: 'b1', fixHint: 'Connect and test a mail provider (PUT /v1/org/mail-provider, POST /v1/org/mail-provider/test), or set those to "manual_review" (PATCH /v1/sites/b1/rights-page).' },
+      ] } };
+      return undefined;
+    };
+    const h = harness({ respond: respond as never });
+    await run(['doctor', '--fix-plan', '--json'], h.io);
+    const plan = (JSON.parse(h.out()) as { fixPlan: string[] }).fixPlan;
+    expect(plan).toHaveLength(2);
+    expect(plan[0]).toMatch(/^a1, b1: Connect and test a mail provider .*\/v1\/sites\/\{cbid\}\/rights-page/);
+    expect(plan[1]).toBe('a1, b1: PUT /v1/org/controller, or send cbid on every request.');
+  });
+
+  it('init stops before creating a site when --out is for another one, and a same-site rerun is a no-op', async () => {
+    const file = JSON.stringify({ site: { cbid: 'a1' } });
+    const other = harness({ files: { 'a.json': file }, respond: sites as never });
+    expect(await run(['init', '--domain', 'c.example', '--out', 'a.json'], other.io)).toBe(1);
+    expect(other.err()).toMatch(/a\.json is for site a1, not c\.example/);
+    expect(other.calls.some((c) => c.method === 'POST')).toBe(false);
+    const same = harness({ files: { 'a.json': file }, respond: sites as never });
+    expect(await run(['init', '--domain', 'a.example', '--out', 'a.json'], same.io)).toBe(0);
+    expect(same.calls.some((c) => c.method === 'POST')).toBe(false);
+  });
+
+  it('connect --defer prints the warning about a site that does not exist', async () => {
+    const h = harness({ env: { K: 'sk_abc' }, respond: ((c: Call) => (c.url.includes('/v1/dsar/executors') && c.method === 'POST' ? { status: 201, body: { id: 'x', system: 't1', warnings: [{ field: 'cbid', reason: 'no site in this organisation has the cbid "typo"' }] } } : c.url.includes('/v1/dsar/executors') ? { status: 200, body: [] } : undefined)) as never });
+    expect(await run(['executors', 'connect', 'chatly', '--site', 'typo', '--key-env', 'K', '--defer'], h.io)).toBe(0);
+    expect(h.err()).toContain('warning: no site in this organisation has the cbid "typo"');
+  });
+
+  it('dsar test --site files for that site', async () => {
+    const h = harness({ respond: ((c: Call) => (c.url.endsWith('/v1/dsar') && c.method === 'POST' ? { status: 201, body: { id: 'r1', type: 'access', cbid: 'b1', status: 'received' } } : undefined)) as never });
+    await run(['dsar', 'test', '--site', 'b1'], h.io);
+    const posts = h.calls.filter((c) => c.url.endsWith('/v1/dsar') && c.method === 'POST');
+    expect(posts).toHaveLength(1);
+    expect(JSON.stringify(posts[0])).toContain('b1');
+  });
+
+  it('names a connection after the product in the host, not api or www', () => {
+    expect(systemFromUrl('https://api.fd-one.example.com')).toBe('fd-one');
+    expect(systemFromUrl('https://www.fd-two.co.uk/x')).toBe('fd-two');
+    expect(systemFromUrl('https://api.com')).toBeUndefined();
   });
 });

@@ -164,7 +164,8 @@ export async function dsarTestCommand(io: CliIo, client: CookieMunchClient, h: O
   const allowed = ['access', 'deletion', 'rectification', 'portability', 'opt-out'];
   const bad = types.filter((t) => !allowed.includes(t));
   if (bad.length) throw h.usage(`--types takes ${allowed.join(', ')}; not ${bad.join(', ')}`);
-  const withCbid = h.flag('with-cbid') === true;
+  onlyFlags(h, ['types', 'with-cbid', 'without-cbid', 'site', 'email', 'cleanup']);
+  const withCbid = h.flag('with-cbid') === true || (h.flagNames ?? []).includes('site');
   const without = h.flag('without-cbid') === true || !withCbid;
   const cbid = withCbid ? h.requireSite() : undefined;
   const email = str(h, 'email') ?? 'cookiemunch-cli-test@example.invalid';
@@ -204,6 +205,7 @@ export async function dsarTestCommand(io: CliIo, client: CookieMunchClient, h: O
 // ---- doctor (CMU-D11) ----
 
 export async function doctorCommand(io: CliIo, client: CookieMunchClient, h: OpsHelpers, cliVersion: string): Promise<number> {
+  onlyFlags(h, ['site', 'org', 'fix-plan']);
   const checks: Array<{ check: string; ok: boolean | null; detail: string }> = [];
   type Me = { orgId?: string; orgName?: string | null; keyPrefix?: string; unscoped?: boolean };
   let me: Me | null = null;
@@ -230,15 +232,20 @@ export async function doctorCommand(io: CliIo, client: CookieMunchClient, h: Ops
     checks.push({ check: 'cli version', ok: null, detail: `${cliVersion}; could not check the latest` });
   }
   const site = h.site();
+  // A typed site that does not exist is a failure: "could not run" would turn a health check green.
+  let noSuchSite = false;
   if (site || me) {
     try {
       const r = await client.integrationHealth(site);
       checks.push({ check: 'integration health', ok: r.ok, detail: `${r.counts.error} error(s), ${r.counts.warning} warning(s)` });
     } catch (e) {
-      checks.push({ check: 'integration health', ok: null, detail: (e as Error).message });
+      noSuchSite = !!site && e instanceof CookieMunchApiError && e.status === 404;
+      checks.push(noSuchSite
+        ? { check: 'site', ok: false, detail: `no site in this organisation has the cbid "${site}"` }
+        : { check: 'integration health', ok: null, detail: (e as Error).message });
     }
   }
-  if (site) {
+  if (site && !noSuchSite) {
     try {
       // A preset the site writes more than it declares (preset_incomplete): a warning, not a failure.
       for (const p of (await client.sites.cookiePresets(site)).presets) {
@@ -249,28 +256,41 @@ export async function doctorCommand(io: CliIo, client: CookieMunchClient, h: Ops
     }
   }
   // --fix-plan: every step still open, in the order to do them.
-  const steps: string[] = [];
-  if (h.flag('fix-plan') === true) {
+  // One step per action: the first API path a step names is the action, and it lists everything it fixes.
+  const merged = new Map<string, { subjects: string[]; text: string }>();
+  const add = (subjects: string[], text: string) => {
+    const key = /\/v1\/[^\s,.)]+/.exec(text)?.[0] ?? text;
+    const seen = merged.get(key);
+    if (!seen) { merged.set(key, { subjects: [...subjects], text }); return; }
+    seen.subjects = [...new Set([...seen.subjects, ...subjects])];
+    if (text.length > seen.text.length) seen.text = text;
+  };
+  if (h.flag('fix-plan') === true && !noSuchSite) {
     const account = me as unknown as { unscoped?: boolean; scopes?: string[]; rights?: { warningDetails?: Array<{ message: string; fix: string; requiredScopes?: string[]; cbids?: string[] }> } } | null;
     for (const w of account?.rights?.warningDetails ?? []) {
       if (site && w.cbids && !w.cbids.includes(site)) continue;
       const lacks = w.requiredScopes?.length && !account?.unscoped && !w.requiredScopes.some((x) => account?.scopes?.includes(x));
-      steps.push(`${w.cbids ? `${w.cbids.join(', ')}: ` : ''}${w.fix}${lacks ? ` (this key lacks ${w.requiredScopes!.join(' or ')})` : ''}`);
+      add(w.cbids ?? [], `${w.fix}${lacks ? ` (this key lacks ${w.requiredScopes!.join(' or ')})` : ''}`);
     }
     try {
       for (const e of await client.fulfillment.executors()) {
-        if (e.state) steps.push(`Deploy ${e.system}'s rights API, then: cookiemunch executors activate ${e.id}`);
+        if (e.state) add([], `Deploy ${e.system}'s rights API, then: cookiemunch executors activate ${e.id}`);
       }
     } catch { /* a key without dsar:read: the health rows below still say what they can */ }
     try {
       const health = await client.integrationHealth(site);
-      for (const c of health.checks ?? []) if (c.ok === false && c.fixHint) steps.push(`${c.subject ? `${c.subject}: ` : ''}${c.fixHint}`);
+      for (const c of health.checks ?? []) if (c.ok === false && c.fixHint) add(c.subject && c.subject !== me?.orgId ? [c.subject] : [], c.fixHint);
     } catch { /* already reported as a check above */ }
   }
+  const steps = [...merged.values()].map(({ subjects, text }) => {
+    // Merged across sites, a path naming one of them would read as the only one to change.
+    const said = subjects.length > 1 ? text.replace(/\/v1\/sites\/[^/\s,.)]+/g, '/v1/sites/{cbid}') : text;
+    return `${subjects.length ? `${subjects.join(', ')}: ` : ''}${said}`;
+  });
   if (json(h)) print(io, { ok: checks.every((c) => c.ok !== false), checks, ...(h.flag('fix-plan') === true ? { fixPlan: steps } : {}) });
   else {
     for (const c of checks) io.stdout(`${c.ok === true ? 'ok  ' : c.ok === false ? 'FAIL' : '--  '} ${c.check}: ${c.detail}\n`);
-    if (h.flag('fix-plan') === true) {
+    if (h.flag('fix-plan') === true && !noSuchSite) {
       io.stdout(steps.length ? '\nStill to do, in order:\n' : '\nNothing left to do.\n');
       steps.forEach((s, i) => io.stdout(`${i + 1}. ${s}\n`));
     }
@@ -522,6 +542,18 @@ function onlyFlags(h: OpsHelpers, allowed: string[]): void {
   if (bad) throw h.usage(`${h.positional.slice(0, 2).join(' ')} does not take --${bad}`);
 }
 
+/** The product's label in a URL's host: `api.acme.example.com` is `acme`, since `api` and `www` name nothing and collide. */
+export function systemFromUrl(url: string): string | undefined {
+  const labels = (/^https?:\/\/([^/:?#]+)/i.exec(url)?.[1] ?? '').toLowerCase().split('.').slice(0, -1);
+  const label = labels.find((l) => l !== 'api' && l !== 'www');
+  return label && /^[a-z][a-z0-9-]{0,31}$/.test(label) ? label : undefined;
+}
+
+const warningText = (w: unknown) => {
+  const o = (w ?? {}) as { field?: string; reason?: string; message?: string };
+  return o.reason ?? o.message ?? JSON.stringify(w);
+};
+
 export async function executorConnectCommand(io: CliIo, client: CookieMunchClient, h: OpsHelpers): Promise<number> {
   const name = h.positional[2];
   if (!name) throw h.usage('usage: cookiemunch executors connect <chatly|forumulate|referalli|preset> --site <cbid> [--key-env <VAR>] [--external-id <id>] [--org-id <id>] [--base-url <url>] [--system <name>] [--defer | --no-verify] [--dry-run]');
@@ -537,7 +569,7 @@ export async function executorConnectCommand(io: CliIo, client: CookieMunchClien
   const orgId = str(h, 'org-id');
   const baseUrl = str(h, 'base-url');
   // cm-standard-v2 is the one preset with no name of its own: name it after the host unless told otherwise.
-  const hostLabel = baseUrl && name === 'cm-standard-v2' ? /^https?:\/\/([a-z][a-z0-9-]{0,31})/i.exec(baseUrl)?.[1]?.toLowerCase() : undefined;
+  const hostLabel = baseUrl && name === 'cm-standard-v2' ? systemFromUrl(baseUrl) : undefined;
   const system = str(h, 'system') ?? hostLabel;
   const body = {
     preset: name, cbid,
@@ -555,7 +587,7 @@ export async function executorConnectCommand(io: CliIo, client: CookieMunchClien
   if (taken) {
     const on = (taken as { cbid?: string }).cbid;
     const next = on === cbid ? `Check it: cookiemunch executors conformance --connection ${taken.id}` : `Connect this site under its own name: cookiemunch executors connect ${name} --site ${cbid}${asFlags(`${system ?? name}-2`)}${keyEnv ? ` --key-env ${keyEnv}` : ''}`;
-    const said = `${taken.system} is already connected (${taken.id}, ${on ? `site ${on}` : 'the whole organisation'}).`;
+    const said = `a connection named ${taken.system} already exists (${taken.id}, ${on ? `site ${on}` : 'the whole organisation'}).`;
     if (json(h)) print(io, { connected: false, code: 'conflict', error: said, existing: { id: taken.id, cbid: on ?? null }, nextCommand: next });
     else io.stderr(`Not connected: ${said}\n${next}\n`);
     return 1;
@@ -566,13 +598,17 @@ export async function executorConnectCommand(io: CliIo, client: CookieMunchClien
       if (json(h)) print(io, r);
       else {
         io.stdout(`Would connect ${name}${secretKey ? ` with the key in ${keyEnv}` : `: ${name} mints the key`}.\n${scope}\n`);
-        for (const w of (r as { warnings?: unknown[] }).warnings ?? []) io.stderr(`warning: ${JSON.stringify(w)}\n`);
+        for (const w of (r as { warnings?: Array<{ field?: string }> }).warnings ?? []) {
+          // The API's own advice names its query parameter: here, the check is what connecting without --dry-run does.
+          io.stderr(`warning: ${w.field === 'secretKey' ? 'the key was not checked. Run without --dry-run to check it: a key that fails is not stored.' : warningText(w)}\n`);
+        }
       }
       return 0;
     }
     // Checked before it is stored: a connection that cannot reach its system fails every rights request quietly.
     const r = await client.fulfillment.connectExecutor(body as never, defer || noVerify ? undefined : { verify: true });
     if (json(h)) { print(io, r); return 0; }
+    for (const w of (r as { warnings?: unknown[] }).warnings ?? []) io.stderr(`warning: ${warningText(w)}\n`);
     if (defer) io.stdout(`Registered ${r.system} (${r.id}), not connected yet: awaiting its first probe, so requests do not reach it.\n${scope}\nOnce its API is live: cookiemunch executors activate ${r.id}\n`);
     else {
       io.stdout(`Connected ${r.system} (${r.id}).\n${scope}\n`);
@@ -583,10 +619,11 @@ export async function executorConnectCommand(io: CliIo, client: CookieMunchClien
     if (!defer) io.stderr(`Check it: cookiemunch executors conformance --connection ${r.id}\n`);
     return 0;
   } catch (e) {
-    if (!(e instanceof CookieMunchApiError) || ![400, 403, 404, 409, 422, 502].includes(e.status)) throw e;
+    if (!(e instanceof CookieMunchApiError) || ![400, 403, 404, 409, 422, 424, 502].includes(e.status)) throw e;
     const b = errorBody(e);
     if (json(h)) { print(io, { connected: false, status: e.status, code: e.code, error: e.message, ...b, ...(e.status === 422 ? {} : { nextCommand: fallback }) }); return 1; }
     io.stderr(`Not connected${e.code ? ` (${e.code})` : ''}: ${e.message}\n`);
+    if (e.status === 422 && baseUrl && /not found/i.test(e.message)) io.stderr('FIX: a rights API built on createRightsHandlers answers a wrong secret with 404, so check the secret first, then the base URL.\n');
     if (e.status === 422) { io.stderr('If its API is not deployed yet, use --defer. To store it unchecked, use --no-verify.\n'); return 1; }
     if (b.field === 'baseUrl' && !baseUrl) { io.stderr('Pass it with --base-url <https url>.\n'); return 1; }
     if (b.acceptedFields && e.status === 400 && secretKey) return 1;
@@ -635,11 +672,18 @@ export async function initCommand(io: CliIo, client: CookieMunchClient, h: OpsHe
   // A re-run, or a CI retry, finds the site it made: a second one would split consent across two cbids.
   const bare = (d: string) => d.toLowerCase().replace(/^www\./, '');
   const existing = given ? undefined : (await client.sites.list()).find((s) => bare(s.domain) === bare(domain!));
+  const onDisk = await io.readFile(out).catch(() => null);
+  let fileCbid: unknown;
+  try { fileCbid = onDisk === null ? undefined : (JSON.parse(onDisk) as { site?: { cbid?: unknown } }).site?.cbid; } catch { /* not ours to read: left as it is */ }
+  // A file for another site would send a later `apply` to the wrong one, so stop before creating anything.
+  if (typeof fileCbid === 'string' && fileCbid !== (given ?? existing?.cbid)) {
+    io.stderr(`${out} is for site ${fileCbid}, not ${given ?? existing?.cbid ?? domain}. Nothing was created or changed. Pass another --out, or move that file.\n`);
+    return 1;
+  }
   if (existing) io.stderr(`${domain} is already site ${existing.cbid}: using it.\n`);
   const cbid = given ?? existing?.cbid ?? (dry ? '<new site>' : (await client.sites.create({ domain: domain! } as never)).cbid);
   const file = `${JSON.stringify({ site: { cbid }, presets: [], cookies: [], executors: [] }, null, 2)}\n`;
-  const hasFile = await io.readFile(out).then(() => true, () => false);
-  if (hasFile) io.stderr(`${out} already exists: left as it is.\n`);
+  if (onDisk !== null) io.stderr(`${out} already exists: left as it is.\n`);
   else if (dry) io.stderr(`Would write ${out}.\n`);
   else { await io.writeFile(out, file); io.stderr(`Wrote ${out}.\n`); }
   io.stdout(framework === 'next'
