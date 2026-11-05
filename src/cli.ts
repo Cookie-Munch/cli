@@ -108,7 +108,7 @@ Usage:
   cookiemunch executors presets
       The versioned presets, which are usable now and which wait on another
       platform, and the organisation's canary address.
-  cookiemunch executors conformance <baseUrl> --secret-env <NAME> [--canary-email <addr>]
+  cookiemunch executors conformance <baseUrl> --secret-env <NAME> [--test-subject <email>] [--canary-email <addr>]
                       [--prefix /privacy] [--json]
       Check any system against the open cm-standard-v2 executor contract, rule by
       rule, using only the canary subject. The credential is read from the
@@ -209,7 +209,7 @@ Usage:
       Every link the site's privacy wiring depends on, with a fix hint for each that
       fails. Exits 1 when a check fails (checks that could not run, or are waived, do not count).
       --fail-on error ignores warnings; --fail-on never always exits 0.
-  cookiemunch provision <file> [--dry-run]
+  cookiemunch provision <file> [--dry-run] [--from-step <n>]
       Wire a product's privacy in one call (site, connections, Atlas, Forumulate) from
       a JSON file without secrets: the Atlas key and Forumulate token come from
       COOKIEMUNCH_ATLAS_SECRET_KEY and COOKIEMUNCH_FORUMULATE_TOKEN. Re-running is a
@@ -242,7 +242,7 @@ Usage:
                         [--email <addr>] [--cleanup]
       File TEST rights requests and read each back. --cleanup deletes exactly the ones this run
       filed (by id; it never deletes by listing).
-  cookiemunch doctor [--site <cbid>] [--org <id>]
+  cookiemunch doctor [--site <cbid>] [--org <id>] [--fix-plan]
       The key (and whose org it is, against --org or COOKIEMUNCH_ORG), its expiry, the CLI
       version against the latest, and integration health. Exits 1 when a check fails.
   cookiemunch keys vend --scopes <a,b> --ttl <1h|30m|seconds> [--cbids <x,y>] [--name <n>]
@@ -258,13 +258,16 @@ Usage:
   cookiemunch init [--framework next] (--site <cbid> | --domain <d>) [--out cookiemunch.json] [--dry-run]
       Make or pick the site, write cookiemunch.json, and print the tag, CSP and footer link to add.
   cookiemunch executors connect <chatly|forumulate|referalli|preset> --site <cbid> [--external-id <id>]
-      [--org-id <id>] [--key-env <VAR>] [--dry-run]
+      [--org-id <id>] [--key-env <VAR>] [--base-url <https url>] [--system <name>] [--defer | --no-verify] [--dry-run]
       One route: the partner mints the key; with --key-env, your key from that variable. Ends in a
       connection, or the one human step and the command to run after it.
+      The key is checked first (a read-only canary lookup): a refused key stores nothing and exits 1.
+      --defer registers a system whose API is not live yet; --no-verify stores it unchecked.
+      --base-url is for a preset that takes an address; --system names a second connection of a preset.
   cookiemunch executors activate <id>
       A connection registered before its API was live (state "pending"): runs conformance, then activates.
   cookiemunch plan [cookiemunch.json] [--detail] [--exit-code] [--json]
-  cookiemunch apply [cookiemunch.json] [--secret-env NAME] [--secrets-out <file>]
+  cookiemunch apply [cookiemunch.json] [--presets-only] [--secret-env NAME] [--secrets-out <file>]
       One file for a site: {site, config, cookies, presets, executors, webhooks, rightsPage,
       partners}, no secrets. plan prints the server's dry run of every part ("No changes" when
       it matches); apply applies them in dependency order and logs each. New webhook secrets
@@ -276,7 +279,7 @@ Usage:
       node_modules, dist and .next are skipped), as cookiemunch.json cookie rows with the
       category left null for you to choose. Static only: names built at run time are missed.
       Needs no API key.
-  cookiemunch types --site <cbid> [--out <file>]
+  cookiemunch types --site <cbid> [--out <file>] [--for <react,embed>]
       Write a .d.ts naming the site's categories (type CookieMunchCategory) that narrows the
       category arguments of @cookiemunch/react to them (default cookiemunch-categories.d.ts).
   cookiemunch --version | version [--json]
@@ -288,6 +291,7 @@ Exit codes:
   0  ok, or nothing to change
   1  a difference (with --exit-code), a failure, or a failed check
   2  a usage mistake
+  3  plan --exit-code: only preset parts moved upstream, nothing in your file
 
 Environment:
   COOKIEMUNCH_API_KEY   an API key (cookiemunch_live_…, or a legacy fck_…). Required.
@@ -309,7 +313,11 @@ interface Parsed {
   flags: Record<string, string | true>;
 }
 
-const BOOLEAN_FLAGS = new Set(['replace', 'exit-code', 'open', 'help', 'json', 'yes', 'strict', 'wait', 'canary', 'dry-run', 'clear-name', 'revoke-atlas-id-grant', 'with-cbid', 'without-cbid', 'cleanup', 'verify', 'detail', 'presets-only', 'defer', 'fix-plan']);
+const BOOLEAN_FLAGS = new Set(['replace', 'exit-code', 'open', 'help', 'json', 'yes', 'strict', 'wait', 'canary', 'dry-run', 'clear-name', 'revoke-atlas-id-grant', 'with-cbid', 'without-cbid', 'cleanup', 'verify', 'detail', 'presets-only', 'defer', 'fix-plan', 'no-verify']);
+
+/** Every flag the help names. An unknown flag that is ignored is a setting someone believes they made. */
+const KNOWN_FLAGS = new Set([...USAGE.matchAll(/--([a-z][a-z-]*)/g)].map((m) => m[1]!));
+const RENAMED_FLAGS: Record<string, string> = { cbid: '--site', 'mint-from': '--external-id (with no --key-env, connect mints the key)' };
 
 export function parseArgs(argv: string[]): Parsed {
   const positional: string[] = [];
@@ -321,6 +329,7 @@ export function parseArgs(argv: string[]): Parsed {
     } else if (a.startsWith('--')) {
       const eq = a.indexOf('=');
       const name = eq > 0 ? a.slice(2, eq) : a.slice(2);
+      if (!KNOWN_FLAGS.has(name) && !BOOLEAN_FLAGS.has(name)) throw new UsageError(`unknown flag --${name}${RENAMED_FLAGS[name] ? `: use ${RENAMED_FLAGS[name]}` : ''}`);
       let value: string | true;
       if (eq > 0) value = a.slice(eq + 1);
       else if (BOOLEAN_FLAGS.has(name)) value = true;
@@ -375,7 +384,7 @@ function proposed(current: Record<string, unknown>, file: Record<string, unknown
 }
 
 /** This package's version, sent in the default User-Agent (a test pins it to package.json). */
-export const CLI_VERSION = '0.16.0';
+export const CLI_VERSION = '0.17.0';
 
 /** `COOKIEMUNCH_USER_AGENT`, else `cookiemunch-cli/<version>`. */
 function userAgent(io: CliIo): string {
@@ -399,7 +408,7 @@ async function rawRequest(io: CliIo, base: string, key: string, method: string, 
     const err = isPlainObject(data) ? data : {};
     throw new CookieMunchApiError(
       res.status,
-      typeof err.error === 'string' ? err.error : `request failed with status ${res.status}`,
+      typeof err.message === 'string' ? err.message : typeof err.error === 'string' ? err.error : `request failed with status ${res.status}`,
       typeof err.code === 'string' ? err.code : undefined,
     );
   }
@@ -725,9 +734,10 @@ async function conformanceCommand(p: Parsed, io: CliIo, client: CookieMunchClien
     canaryEmail = (await client.fulfillment.executorPresets()).canaryEmail;
   }
   const prefix = str(p.flags, 'prefix');
+  const testSubject = str(p.flags, 'test-subject');
   let report;
   try {
-    report = await runExecutorConformance({ baseUrl, secret, canaryEmail, fetch: io.fetch, ...(prefix ? { prefix } : {}) });
+    report = await runExecutorConformance({ baseUrl, secret, canaryEmail, fetch: io.fetch, ...(prefix ? { prefix } : {}), ...(testSubject ? { testSubjectEmail: testSubject } : {}) });
   } catch (e) {
     throw new UsageError((e as Error).message);
   }
@@ -1014,6 +1024,7 @@ export async function run(argv: string[], io: CliIo): Promise<number> {
     readJson: (path) => readConfigFile(io, path),
     usage: (m) => new UsageError(m),
     flag: (name) => p.flags[name],
+    flagNames: Object.keys(p.flags),
     positional: p.positional,
   };
   try {

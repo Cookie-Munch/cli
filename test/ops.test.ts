@@ -1,7 +1,7 @@
 /** CMU-B15, D11, D12, S02: version, cookies/executors as files, dsar test, doctor, keys vend, plan/apply, exit codes. */
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { run, CLI_VERSION } from '../src/cli.js';
+import { run, CLI_VERSION, USAGE } from '../src/cli.js';
 import { parseTtl } from '../src/ops.js';
 import { harness, type Call } from './harness.js';
 
@@ -191,7 +191,7 @@ describe('executors connect (one route)', () => {
   it('mints through the partner and says the scope', async () => {
     const h = harness({ respond: (c) => (c.url.includes('/v1/dsar/executors') ? { status: 201, body: { id: 'e1', system: 'chatly' } } : undefined) as never });
     expect(await run(['executors', 'connect', 'chatly', '--site', 'c1', '--external-id', 'ws1'], h.io)).toBe(0);
-    expect(h.calls[0]!.body).toEqual({ preset: 'chatly', cbid: 'c1', mintFrom: 'chatly', externalId: 'ws1' });
+    expect(h.calls.find((c) => c.method === 'POST')!.body).toEqual({ preset: 'chatly', cbid: 'c1', mintFrom: 'chatly', externalId: 'ws1' });
     expect(h.out()).toMatch(/Scoped to c1/);
   });
 
@@ -205,8 +205,9 @@ describe('executors connect (one route)', () => {
   it('--key-env sends the key, and a dry run stores nothing', async () => {
     const h = harness({ env: { CK: 'sk_abc' }, respond: (c) => (c.url.includes('/v1/dsar/executors') ? { status: 200, body: { dryRun: true, executor: {}, diff: [] } } : undefined) as never });
     expect(await run(['executors', 'connect', 'chatly', '--site', 'c1', '--key-env', 'CK', '--dry-run'], h.io)).toBe(0);
-    expect(h.calls[0]!.url).toContain('dryRun=1');
-    expect(h.calls[0]!.body).toEqual({ preset: 'chatly', cbid: 'c1', secretKey: 'sk_abc' });
+    const post = h.calls.find((c) => c.method === 'POST')!;
+    expect(post.url).toContain('dryRun=1');
+    expect(post.body).toEqual({ preset: 'chatly', cbid: 'c1', secretKey: 'sk_abc' });
   });
 });
 
@@ -256,7 +257,7 @@ describe('init and doctor --fix-plan', () => {
       return { status: 500, body: {} };
     } });
     await run(['doctor', '--fix-plan'], h.io);
-    expect(h.out()).toMatch(/1\. Connect Chatly\. \(key needs privacy:execute\)\n2\. Deploy mine's rights API, then: cookiemunch executors activate e1/);
+    expect(h.out()).toMatch(/1\. Connect Chatly\. \(this key lacks privacy:execute\)\n2\. Deploy mine's rights API, then: cookiemunch executors activate e1/);
   });
 });
 
@@ -271,5 +272,113 @@ describe('preview --screenshot', () => {
     h.io.screenshot = async () => { throw new Error('no chromium'); };
     expect(await run(['preview', '--site', 'c1', '--url', 'https://a.example', '--screenshot', 'b.png'], h.io)).toBe(1);
     expect(h.err()).toMatch(/playwright install chromium/);
+  });
+});
+
+describe('doctor --fix-plan says what applies', () => {
+  const withMe = (me: object) => harness({ respond: (c) => (c.url.endsWith('/v1/me') ? { status: 200, body: { orgId: 'o', rights: { warningDetails: [{ code: 'no_controller', message: 'm', fix: 'PUT /v1/org/controller.', cbids: ['other'], requiredScopes: ['rights:write'] }] }, ...me } } : { status: 500, body: {} }) });
+  it('a full-access key is not told it needs a scope, and a step about another site is left out', async () => {
+    const full = withMe({ unscoped: true });
+    await run(['doctor', '--fix-plan'], full.io);
+    expect(full.out()).toMatch(/other: PUT \/v1\/org\/controller\.\n/);
+    const here = withMe({ unscoped: true });
+    await run(['doctor', '--site', 'mine', '--fix-plan'], here.io);
+    expect(here.out()).not.toMatch(/PUT \/v1\/org\/controller/);
+  });
+});
+
+describe('ForgeDeck retest: commands that said success', () => {
+  const executors = (c: Call, post: unknown) => (c.url.includes('/v1/dsar/executors') ? (c.method === 'GET' ? { status: 200, body: [] } : post) : undefined);
+
+  it('connect checks the key: a refusal stores nothing and exits 1; a good key says what it found', async () => {
+    const bad = harness({ env: { K: 'fake_key_value_123' }, respond: ((c: Call) => executors(c, { status: 422, body: { error: 'the probe failed, so nothing was stored: unauthorized', code: 'verify_failed', verify: {} } })) as never });
+    expect(await run(['executors', 'connect', 'referalli', '--site', 'c1', '--key-env', 'K'], bad.io)).toBe(1);
+    expect(bad.calls.find((c) => c.method === 'POST')!.url).toMatch(/verify=1/);
+    expect(bad.err()).toMatch(/nothing was stored/);
+    expect(bad.out()).not.toMatch(/Connected/);
+    const good = harness({ env: { K: 'real_key_value_123' }, respond: ((c: Call) => executors(c, { status: 201, body: { id: 'e1', system: 'referalli', verify: { verdict: 'the key works' } } })) as never });
+    expect(await run(['executors', 'connect', 'referalli', '--site', 'c1', '--key-env', 'K'], good.io)).toBe(0);
+    expect(good.out()).toMatch(/Connected referalli[\s\S]*the key works/);
+  });
+
+  it('--defer registers it pending and does not say connected; --no-verify warns; --base-url and --system are sent', async () => {
+    const created = (c: Call) => executors(c, { status: 201, body: { id: 'e1', system: 'x' } });
+    const d = harness({ env: { K: 'real_key_value_123' }, respond: created as never });
+    expect(await run(['executors', 'connect', 'referalli', '--site', 'c1', '--key-env', 'K', '--defer'], d.io)).toBe(0);
+    expect(d.calls.find((c) => c.method === 'POST')!.body).toMatchObject({ state: 'pending' });
+    expect(d.out()).toMatch(/not connected yet/);
+    const n = harness({ env: { K: 'real_key_value_123' }, respond: created as never });
+    expect(await run(['executors', 'connect', 'cm-standard-v2', '--site', 'c1', '--key-env', 'K', '--no-verify', '--base-url', 'https://a.example/x', '--system', 'mine'], n.io)).toBe(0);
+    const post = n.calls.find((c) => c.method === 'POST')!;
+    expect(post.url).not.toMatch(/verify/);
+    expect(post.body).toMatchObject({ baseUrl: 'https://a.example/x', system: 'mine' });
+    expect(n.err()).toMatch(/not checked/);
+  });
+
+  it('cm-standard-v2 with only --base-url is named after its host', async () => {
+    const h = harness({ env: { K: 'real_key_value_123' }, respond: ((c: Call) => executors(c, { status: 200, body: { dryRun: true, executor: {}, diff: [] } })) as never });
+    expect(await run(['executors', 'connect', 'cm-standard-v2', '--site', 'c1', '--key-env', 'K', '--base-url', 'https://example.com/x', '--dry-run'], h.io)).toBe(0);
+    expect(h.calls.find((c) => c.method === 'POST')!.body).toMatchObject({ baseUrl: 'https://example.com/x', system: 'example' });
+  });
+
+  it('a missing base URL names the flag', async () => {
+    const h = harness({ env: { K: 'real_key_value_123' }, respond: ((c: Call) => executors(c, { status: 400, body: { error: 'baseUrl required', field: 'baseUrl', acceptedFields: ['baseUrl'] } })) as never });
+    expect(await run(['executors', 'connect', 'cm-standard-v2', '--site', 'c1', '--key-env', 'K'], h.io)).toBe(1);
+    expect(h.err()).toMatch(/--base-url/);
+  });
+
+  it('a name already taken names the connection and a command that can succeed, without trying to mint', async () => {
+    const h = harness({ respond: ((c: Call) => (c.url.includes('/v1/dsar/executors') ? { status: 200, body: [{ id: 'e1', system: 'chatly', cbid: 'siteA' }] } : undefined)) as never });
+    expect(await run(['executors', 'connect', 'chatly', '--site', 'siteB'], h.io)).toBe(1);
+    expect(h.err()).toMatch(/e1, site siteA/);
+    expect(h.err()).toMatch(/--site siteB --system chatly-2/);
+    expect(h.calls.some((c) => c.method === 'POST')).toBe(false);
+  });
+
+  it('flags: unknown is refused by name, a renamed one says what to use, a known one the command ignores is refused', async () => {
+    const h = harness({ env: { K: 'real_key_value_123' } });
+    expect(await run(['executors', 'connect', 'referalli', '--site', 'c1', '--notaflag', '--dry-run'], h.io)).toBe(2);
+    expect(h.err()).toMatch(/unknown flag --notaflag/);
+    const r = harness();
+    expect(await run(['executors', 'connect', 'referalli', '--cbid', 'c1'], r.io)).toBe(2);
+    expect(r.err()).toMatch(/unknown flag --cbid: use --site/);
+    const k = harness();
+    expect(await run(['init', '--domain', 'a.example', '--defer'], k.io)).toBe(2);
+    expect(k.err()).toMatch(/init .*does not take --defer/);
+  });
+
+  it('every flag the source reads is one the help names, or it would be refused', () => {
+    const dir = new URL('../src/', import.meta.url);
+    const src = ['cli.ts', 'ops.ts', 'integrations.ts', 'rights-page.ts', 'source.ts'].map((f) => readFileSync(new URL(f, dir), 'utf8')).join('');
+    const used = [...src.matchAll(/(?:flag\(|str\(h, |str\(p\.flags, |str\(flags, )'([a-z-]+)'/g)].map((m) => m[1]!);
+    expect(used.filter((f) => !USAGE.includes(`--${f}`) && f !== 'help')).toEqual([]);
+  });
+
+  it('init refuses a junk domain before any call, even on a dry run', async () => {
+    for (const extra of [[], ['--dry-run']]) {
+      const h = harness();
+      expect(await run(['init', '--domain', 'not a domain', ...extra], h.io)).toBe(2);
+      expect(h.err()).toMatch(/--domain must be a hostname/);
+      expect(h.calls).toEqual([]);
+      expect(h.written).toEqual({});
+    }
+  });
+
+  it('init reuses the site with that domain, and leaves an existing file alone', async () => {
+    const sites = (c: Call) => (c.url.endsWith('/v1/sites') ? (c.method === 'GET' ? { status: 200, body: [{ cbid: 'c9', domain: 'www.Dup.example' }] } : { status: 201, body: { cbid: 'NEW' } }) : undefined);
+    const h = harness({ respond: sites as never });
+    expect(await run(['init', '--domain', 'dup.example', '--out', 'a.json'], h.io)).toBe(0);
+    expect(h.calls.some((c) => c.method === 'POST')).toBe(false);
+    expect(h.written['a.json']).toMatch(/"cbid": "c9"/);
+    const kept = harness({ respond: sites as never, files: { 'a.json': '{"mine":1}' } });
+    expect(await run(['init', '--domain', 'dup.example', '--out', 'a.json'], kept.io)).toBe(0);
+    expect(kept.written).toEqual({});
+    expect(kept.err()).toMatch(/left as it is/);
+  });
+
+  it('API errors print the server message, not the bare code', async () => {
+    const h = harness({ respond: ((c: Call) => (c.url.includes('/v1/sandbox') ? { status: 403, body: { error: 'insufficient_scope', message: 'missing required scope: orgs:create', code: 'forbidden' } } : undefined)) as never });
+    expect(await run(['sandbox', 'create', '--key-name', 'x'], h.io)).toBe(1);
+    expect(h.err()).toMatch(/API error 403 \(forbidden\): missing required scope: orgs:create/);
   });
 });

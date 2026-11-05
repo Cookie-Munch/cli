@@ -2,6 +2,13 @@
 
 Every published release, newest first. Dates are the day the version was cut.
 
+## 0.17.0
+
+- `executors connect` checks the key first: a refused key stores nothing and exits 1. New: `--no-verify`, `--base-url`, `--system`; `--defer` now registers a pending connection. An existing connection is named, with a command that can succeed.
+- `init` refuses a non-hostname `--domain`, reuses a site with that domain, and leaves an existing `--out` file alone.
+- Unknown flags are refused by name; `connect`, `activate` and `init` also refuse known flags they would ignore.
+- `activate` lists the failing rules, `dsar test` prints warnings, `plan --json` carries `presets`, `doctor --fix-plan` names sites and only mentions scopes the key lacks. `conformance --test-subject`. Help lists exit 3.
+
 ## 0.16.0
 
 - `executors connect`, `executors activate`, `init`, `doctor --fix-plan`, `plan --detail`, `apply --presets-only`, `executors push --defer`.
