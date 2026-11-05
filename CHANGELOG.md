@@ -2,6 +2,10 @@
 
 Every published release, newest first. Dates are the day the version was cut.
 
+## 0.18.0 (2026-11-05)
+
+- Changed: every command refuses a flag it would ignore, read from its own help entry, and a stray word; a script passing either now exits 2. init stops when --out is a file it cannot read as a site's. doctor names what fails and the first fix, and takes --fail-on. A connect missing orgId names --org-id and puts it in the next command. Added: executors conformance --erase-subject <email> --yes. plan and apply list --site, partners --dry-run, executors push --defer, executors diff --exit-code.
+
 ## 0.17.1 (2026-11-05)
 
 - Fixed: a refused mint prints its reason and code (the API answers 424). doctor --site fails on a site that does not exist, and doctor and dsar test refuse flags they would ignore. init stops before creating a site when --out is for another one. dsar test --site files for that site. connect --defer prints the API warning, the dry-run warning is plain text, the default system name skips api and www, and a wrong key with --base-url gets a fix line. --fix-plan gives one step per action.

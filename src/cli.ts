@@ -108,13 +108,15 @@ Usage:
   cookiemunch executors presets
       The versioned presets, which are usable now and which wait on another
       platform, and the organisation's canary address.
-  cookiemunch executors conformance <baseUrl> --secret-env <NAME> [--test-subject <email>] [--canary-email <addr>]
+  cookiemunch executors conformance <baseUrl> --secret-env <NAME> [--test-subject <email>] [--erase-subject <email> --yes] [--canary-email <addr>]
                       [--prefix /privacy] [--json]
       Check any system against the open cm-standard-v2 executor contract, rule by
       rule, using only the canary subject. The credential is read from the
       environment variable NAME, never from the command line. Without
       --canary-email the organisation's canary address is fetched (needs
       COOKIEMUNCH_API_KEY); with it, no Cookie Munch key is needed at all.
+      --erase-subject really erases that throwaway subject through your erase code, then
+      checks a lookup no longer finds them: seed it again before each run.
       Exits 1 when any rule fails.
   cookiemunch executors conformance --connection <id> [--json]
       The same suite, run by Cookie Munch against a connected system.
@@ -217,7 +219,7 @@ Usage:
   cookiemunch keys report [--unused-days <n>] [--expiring-days <n>] [--json]
       Key hygiene: keys unused for n days (default 90), keys with broad access, and
       keys expiring within n days (default 14). Needs a full-access key.
-  cookiemunch partners list|link|unlink --site <cbid> [--partner <id>]
+  cookiemunch partners list|link|unlink --site <cbid> [--partner <id>] [--dry-run]
                        [--external-id <id>] [--label <text>] [<linkId>]
       Grant a partner platform the site's consent events (no secret is created), list
       the grants, or revoke one. Any partner this deployment knows (forumulate, atlas, chatly,
@@ -232,25 +234,32 @@ Usage:
       Express or nginx; without it, the header value. --site uses your site's own
       Cookie Munch manifest (its logo, fonts, sync endpoint). Needs no API key. Exits 1
       when a named product has not published a manifest (the rest are still merged).
-  cookiemunch cookies diff|push <file> --site <cbid> [--replace] [--exit-code]
+  cookiemunch cookies diff <file> --site <cbid> [--replace] [--exit-code]
+  cookiemunch cookies push <file> --site <cbid> [--replace]
       Declarations as a file ({"cookies": [...]}), through the server's dry run. push applies
       only when something differs; --replace also removes your own declarations the file leaves out (preset rows stay).
-  cookiemunch executors pull [<file>] | diff <file> | push <file> [--secret-env NAME]
+  cookiemunch executors pull [<file>] [--out <file>]
+  cookiemunch executors diff <file> [--exit-code]
+  cookiemunch executors push <file> [--secret-env NAME] [--defer]
       Connected systems as a file. The file never carries a secret: a new connection's API key
       comes from the environment variable --secret-env names.
   cookiemunch dsar test [--types access,deletion] [--with-cbid --site <cbid>] [--without-cbid]
                         [--email <addr>] [--cleanup]
       File TEST rights requests and read each back. --cleanup deletes exactly the ones this run
       filed (by id; it never deletes by listing).
-  cookiemunch doctor [--site <cbid>] [--org <id>] [--fix-plan]
+  cookiemunch doctor [--site <cbid>] [--org <id>] [--fix-plan] [--fail-on error|warning|never]
       The key (and whose org it is, against --org or COOKIEMUNCH_ORG), its expiry, the CLI
-      version against the latest, and integration health. Exits 1 when a check fails.
+      version against the latest, and integration health, naming what fails and the first fix.
+      Exits 1 when a check fails. A health warning fails it unless --fail-on says otherwise.
   cookiemunch keys vend --scopes <a,b> --ttl <1h|30m|seconds> [--cbids <x,y>] [--name <n>]
       A short-lived key (at most 12 h) within this key's own scopes; prints the key alone.
       Needs keys:write (or a full-access key).
-  cookiemunch keys self | rotate-self
+  cookiemunch keys self
+  cookiemunch keys rotate-self
       This key's own prefix, scopes and expiry; or rotate it (the new key is printed once).
-  cookiemunch sandbox [show] | create [--key-name <n>] | delete [--yes]
+  cookiemunch sandbox [show]
+  cookiemunch sandbox create [--key-name <n>]
+  cookiemunch sandbox delete [--yes]
       The organisation's sandbox: a separate test organisation with the same people and plan
       features, never billed; its keys are test keys and its rights requests are all tests.
       create makes it (or reuses it) and prints a new key for it alone; delete erases it and
@@ -266,8 +275,8 @@ Usage:
       --base-url is for a preset that takes an address; --system names a second connection of a preset.
   cookiemunch executors activate <id>
       A connection registered before its API was live (state "pending"): runs conformance, then activates.
-  cookiemunch plan [cookiemunch.json] [--detail] [--exit-code] [--json]
-  cookiemunch apply [cookiemunch.json] [--presets-only] [--secret-env NAME] [--secrets-out <file>]
+  cookiemunch plan [cookiemunch.json] [--site <cbid>] [--detail] [--exit-code] [--json]
+  cookiemunch apply [cookiemunch.json] [--site <cbid>] [--presets-only] [--secret-env NAME] [--secrets-out <file>]
       One file for a site: {site, config, cookies, presets, executors, webhooks, rightsPage,
       partners}, no secrets. plan prints the server's dry run of every part ("No changes" when
       it matches); apply applies them in dependency order and logs each. New webhook secrets
@@ -317,6 +326,53 @@ const BOOLEAN_FLAGS = new Set(['replace', 'exit-code', 'open', 'help', 'json', '
 
 /** Every flag the help names. An unknown flag that is ignored is a setting someone believes they made. */
 const KNOWN_FLAGS = new Set([...USAGE.matchAll(/--([a-z][a-z-]*)/g)].map((m) => m[1]!));
+const ANY_COMMAND = new Set(['json', 'help', 'idempotency-key']);
+/** What each command takes, read from its own help entry: `cmd sub` or `cmd` → its flags. `a|b` is one entry for both. */
+export const COMMAND_FLAGS: ReadonlyMap<string, ReadonlySet<string>> = (() => {
+  const map = new Map<string, Set<string>>();
+  const entries = USAGE.slice(0, USAGE.indexOf('\nEvery command takes')).split(/^ {2}cookiemunch /m).slice(1);
+  for (const entry of entries) {
+    const [cmd, second] = entry.split(/\s+/);
+    if (!cmd || cmd.startsWith('-')) continue;
+    const subs = second && /^[a-z][a-z-]*(\|[a-z][a-z-]*)*$/.test(second) ? second.split('|') : [''];
+    for (const s of subs) {
+      const key = s ? `${cmd} ${s}` : cmd;
+      const flags = map.get(key) ?? new Set<string>();
+      for (const m of entry.matchAll(/--([a-z][a-z-]*)/g)) flags.add(m[1]!);
+      map.set(key, flags);
+    }
+  }
+  return map;
+})();
+
+/** A real flag a command would ignore is a setting that did not happen, the same as an unknown one. */
+export function flagNotTaken(positional: string[], flags: Record<string, unknown>): string | undefined {
+  const [cmd, sub] = positional;
+  const key = sub && COMMAND_FLAGS.has(`${cmd} ${sub}`) ? `${cmd} ${sub}` : cmd;
+  const takes = key ? COMMAND_FLAGS.get(key) : undefined;
+  if (!takes) return undefined;
+  const bad = Object.keys(flags).find((f) => !takes.has(f) && !ANY_COMMAND.has(f));
+  return bad && `${key} does not take --${bad}`;
+}
+
+/** How many words a command takes after its name. Anything not listed takes none. */
+const POSITIONALS: Record<string, number> = Object.fromEntries([
+  'config diff', 'config push', 'config validate', 'rights-page diff', 'rights-page push', 'site brand', 'provision', 'plan', 'apply', 'scan-source', 'sandbox',
+  'cookies diff', 'cookies push', 'cookies preset', 'cookies unpreset', 'cookies import-manifest', 'cookies delete-observed', 'cookies translation',
+  'executors pull', 'executors diff', 'executors push', 'executors test', 'executors webhook-test', 'executors deliveries', 'executors conformance',
+  'executors roll-completion-secret', 'executors upgrade-preset', 'executors recheck', 'executors health', 'executors connect', 'executors activate',
+  'partners list', 'partners link', 'partners unlink',
+].map((k) => [k, 1]));
+
+/** A word nothing reads, such as a site after --with-cbid, would be dropped and the command would act elsewhere. */
+export function strayWord(positional: string[]): string | undefined {
+  const [cmd, sub] = positional;
+  const key = sub && COMMAND_FLAGS.has(`${cmd} ${sub}`) ? `${cmd} ${sub}` : cmd;
+  if (!key || !COMMAND_FLAGS.has(key)) return undefined;
+  const word = positional.slice(key.split(' ').length)[POSITIONALS[key] ?? 0];
+  return word === undefined ? undefined : `${key} does not take "${word}"`;
+}
+
 const RENAMED_FLAGS: Record<string, string> = { cbid: '--site', 'mint-from': '--external-id (with no --key-env, connect mints the key)' };
 
 export function parseArgs(argv: string[]): Parsed {
@@ -384,7 +440,7 @@ function proposed(current: Record<string, unknown>, file: Record<string, unknown
 }
 
 /** This package's version, sent in the default User-Agent (a test pins it to package.json). */
-export const CLI_VERSION = '0.17.1';
+export const CLI_VERSION = '0.18.0';
 
 /** `COOKIEMUNCH_USER_AGENT`, else `cookiemunch-cli/<version>`. */
 function userAgent(io: CliIo): string {
@@ -720,6 +776,8 @@ async function conformanceCommand(p: Parsed, io: CliIo, client: CookieMunchClien
   const connection = str(p.flags, 'connection');
   if (connection) {
     if (!client) throw new UsageError('--connection runs on Cookie Munch: set COOKIEMUNCH_API_KEY');
+    const local = ['test-subject', 'erase-subject'].find((f) => p.flags[f] !== undefined);
+    if (local) throw new UsageError(`--${local} needs <baseUrl>: a --connection run only uses the canary`);
     return printConformance(io, await client.fulfillment.executorConformance(connection), asJson);
   }
   const baseUrl = p.positional[2];
@@ -735,9 +793,13 @@ async function conformanceCommand(p: Parsed, io: CliIo, client: CookieMunchClien
   }
   const prefix = str(p.flags, 'prefix');
   const testSubject = str(p.flags, 'test-subject');
+  const eraseSubject = str(p.flags, 'erase-subject');
+  if (eraseSubject && p.flags.yes !== true && !(await io.confirm?.(`This really erases ${eraseSubject} through ${baseUrl}. Continue?`))) {
+    throw new UsageError('--erase-subject really erases that subject: confirm, or pass --yes');
+  }
   let report;
   try {
-    report = await runExecutorConformance({ baseUrl, secret, canaryEmail, fetch: io.fetch, ...(prefix ? { prefix } : {}), ...(testSubject ? { testSubjectEmail: testSubject } : {}) });
+    report = await runExecutorConformance({ baseUrl, secret, canaryEmail, fetch: io.fetch, ...(prefix ? { prefix } : {}), ...(testSubject ? { testSubjectEmail: testSubject } : {}), ...(eraseSubject ? { eraseSubjectEmail: eraseSubject } : {}) });
   } catch (e) {
     throw new UsageError((e as Error).message);
   }
@@ -929,6 +991,11 @@ export async function run(argv: string[], io: CliIo): Promise<number> {
     return 2;
   }
   const [cmd, sub] = p.positional;
+  const notTaken = flagNotTaken(p.positional, p.flags) ?? strayWord(p.positional);
+  if (notTaken && p.flags.help !== true) {
+    io.stderr(`${notTaken}\n\n${USAGE}`);
+    return 2;
+  }
   // `version [--json]` needs no key either.
   if (cmd === 'version') {
     return versionCommand(io, CLI_VERSION, io.env.COOKIEMUNCH_BASE_URL || DEFAULT_BASE_URL, p.flags.json === true);

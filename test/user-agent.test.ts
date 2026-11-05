@@ -33,7 +33,7 @@ describe('User-Agent', () => {
   });
   it('the raw requests send it too', async () => {
     const { h, seen } = withUa();
-    await run(['executors', 'test', 'ex1', '--site', 'acme', '--canary'], h.io);
+    await run(['executors', 'test', 'ex1', '--canary'], h.io);
     expect(seen.length).toBeGreaterThan(0);
     for (const s of seen) expect(s.headers!['User-Agent']).toBe(`cookiemunch-cli/${CLI_VERSION}`);
   });

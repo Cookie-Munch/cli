@@ -1,7 +1,7 @@
 /** CMU-B15, D11, D12, S02: version, cookies/executors as files, dsar test, doctor, keys vend, plan/apply, exit codes. */
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { run, CLI_VERSION, USAGE } from '../src/cli.js';
+import { run, CLI_VERSION, USAGE, COMMAND_FLAGS, flagNotTaken, strayWord } from '../src/cli.js';
 import { parseTtl, systemFromUrl } from '../src/ops.js';
 import { harness, type Call } from './harness.js';
 
@@ -370,7 +370,7 @@ describe('ForgeDeck retest: commands that said success', () => {
     expect(await run(['init', '--domain', 'dup.example', '--out', 'a.json'], h.io)).toBe(0);
     expect(h.calls.some((c) => c.method === 'POST')).toBe(false);
     expect(h.written['a.json']).toMatch(/"cbid": "c9"/);
-    const kept = harness({ respond: sites as never, files: { 'a.json': '{"mine":1}' } });
+    const kept = harness({ respond: sites as never, files: { 'a.json': JSON.stringify({ site: { cbid: 'c9' } }) } });
     expect(await run(['init', '--domain', 'dup.example', '--out', 'a.json'], kept.io)).toBe(0);
     expect(kept.written).toEqual({});
     expect(kept.err()).toMatch(/left as it is/);
@@ -451,5 +451,73 @@ describe('the second retest', () => {
     expect(systemFromUrl('https://api.fd-one.example.com')).toBe('fd-one');
     expect(systemFromUrl('https://www.fd-two.co.uk/x')).toBe('fd-two');
     expect(systemFromUrl('https://api.com')).toBeUndefined();
+  });
+});
+
+describe('every command refuses a flag it would ignore', () => {
+  it('names the command and the flag, exit 2, and calls nothing', async () => {
+    for (const argv of [['doctor', '--out', 'x.json'], ['config', 'pull', '--site', 'a', '--defer'], ['executors', 'diff', 'f.json', '--secret-env', 'K'], ['scan', '--site', 'a', '--out', 'x'], ['sandbox', 'delete', '--key-name', 'x'], ['plan', '--secrets-out', 'x']]) {
+      const h = harness();
+      expect(await run(argv, h.io)).toBe(2);
+      expect(h.err()).toMatch(/does not take --/);
+      expect(h.calls).toHaveLength(0);
+    }
+  });
+
+  it('reads no help entry wrongly: a flag right after the command is not a subcommand', () => {
+    expect(COMMAND_FLAGS.get('scan')).toContain('wait');
+    expect(COMMAND_FLAGS.has('scan --site')).toBe(false);
+    expect(flagNotTaken(['scan'], { site: 'a', wait: true, json: true })).toBeUndefined();
+  });
+
+  it('--erase-subject needs a yes, and neither subject flag runs with --connection', async () => {
+    const h = harness({ env: { S: 'k' } });
+    expect(await run(['executors', 'conformance', 'https://a.example', '--secret-env', 'S', '--canary-email', 'canary-0123456789abcdef@canary.cookiemunch.net', '--erase-subject', 't@a.example'], h.io)).toBe(2);
+    expect(h.err()).toMatch(/really erases/);
+    const c = harness();
+    expect(await run(['executors', 'conformance', '--connection', 'e1', '--test-subject', 't@a.example'], c.io)).toBe(2);
+  });
+});
+
+describe('the third retest', () => {
+  it('refuses a stray word, and acts on nothing', async () => {
+    for (const argv of [['dsar', 'test', '--site', 'b', '--with-cbid', 'a'], ['plan', 'a.json', 'stray'], ['init', '--domain', 'a.example', 'stray'], ['executors', 'connect', 'referalli', 'stray', '--site', 'a'], ['doctor', 'stray']]) {
+      const h = harness();
+      expect(await run(argv, h.io)).toBe(2);
+      expect(h.err()).toMatch(/does not take "/);
+      expect(h.calls).toHaveLength(0);
+    }
+    expect(strayWord(['sandbox', 'show'])).toBeUndefined();
+    expect(strayWord(['plan', 'a.json'])).toBeUndefined();
+  });
+
+  it('init stops on a file that is not a site\'s, whatever is in it, and creates nothing', async () => {
+    for (const content of ['{"mine":1}', 'not json', '']) {
+      const h = harness({ files: { 'keep.json': content }, respond: ((c: Call) => (c.url.endsWith('/v1/sites') && c.method === 'GET' ? { status: 200, body: [] } : undefined)) as never });
+      expect(await run(['init', '--domain', 'd.example', '--out', 'keep.json'], h.io)).toBe(1);
+      expect(h.calls.some((c) => c.method === 'POST')).toBe(false);
+    }
+  });
+
+  it('a connect missing orgId names the flag and puts it in the next command', async () => {
+    const h = harness({ env: { K: 'sk_abc' }, respond: ((c: Call) => (c.url.includes('/v1/dsar/executors') && c.method === 'POST' ? { status: 400, body: { error: 'orgId required for the forumulate preset', code: 'bad_request', field: 'orgId', acceptedFields: ['orgId'] } } : c.url.includes('/v1/dsar/executors') ? { status: 200, body: [] } : undefined)) as never });
+    expect(await run(['executors', 'connect', 'forumulate', '--site', 'a', '--key-env', 'K'], h.io)).toBe(1);
+    expect(h.err()).toMatch(/Pass it with --org-id/);
+    expect(h.err()).toMatch(/--site a --org-id <your forumulate organisation id> --key-env K/);
+  });
+
+  it('doctor names the failing warning and its fix; --fail-on accepts it', async () => {
+    const respond = ((c: Call) => {
+      if (c.url.endsWith('/v1/me')) return { status: 200, body: { orgId: 'o', keyPrefix: 'p' } };
+      if (c.url.endsWith('/v1/keys/self')) return { status: 200, body: { prefix: 'p' } };
+      if (c.url.includes('registry.npmjs.org')) return { status: 200, body: { version: pkg.version } };
+      if (c.url.includes('/v1/integration-health')) return { status: 200, body: { ok: false, counts: { error: 0, warning: 1, notChecked: 0 }, checks: [{ check: 'cookies.undeclared', ok: false, severity: 'warning', subject: 's', fixHint: 'Declare them.' }] } };
+      return undefined;
+    }) as never;
+    const h = harness({ respond });
+    expect(await run(['doctor'], h.io)).toBe(1);
+    expect(h.out()).toContain('0 error(s), 1 warning(s): cookies.undeclared. First fix: Declare them.');
+    expect(await run(['doctor', '--fail-on', 'error'], harness({ respond }).io)).toBe(0);
+    expect(await run(['doctor', '--fail-on', 'nope'], harness({ respond }).io)).toBe(2);
   });
 });
