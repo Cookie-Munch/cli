@@ -2,6 +2,12 @@
 
 Every published release, newest first. Dates are the day the version was cut.
 
+## 0.16.0
+
+- `executors connect`, `executors activate`, `init`, `doctor --fix-plan`, `plan --detail`, `apply --presets-only`, `executors push --defer`.
+- `plan --exit-code` exits 3 when only upstream presets drifted. `pinned` on a preset.
+- Conformance prints the fix first. Installs a `cm` alias. `preview --screenshot`.
+
 ## 0.15.0 (2026-11-04)
 
 - Added: `plan` and `config push` print `not applied: <path> (the server's dry run does not keep it)` for any field sent that the server would not store; `plan --exit-code` then exits 1.

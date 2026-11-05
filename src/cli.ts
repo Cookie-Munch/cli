@@ -41,11 +41,13 @@ import { healthCommand, keysCommand, partnersCommand, provisionCommand, siteComm
 import { countBySeverity, formatDesignWarnings, summaryLine } from './design-warnings.js';
 import { cspCommand } from './csp.js';
 import { categoryTypes, offeredCategories, scanSourceFiles, skipDir, SOURCE_EXTENSIONS } from './source.js';
-import { bundleCommand, cookiesFileCommand, doctorCommand, dsarTestCommand, executorsFileCommand, keysExtraCommand, sandboxCommand, versionCommand, type OpsHelpers } from './ops.js';
+import { executorActivateCommand, executorConnectCommand, initCommand, bundleCommand, cookiesFileCommand, doctorCommand, dsarTestCommand, executorsFileCommand, keysExtraCommand, sandboxCommand, versionCommand, type OpsHelpers } from './ops.js';
 
 export const DEFAULT_BASE_URL = 'https://api.cookiemunch.net';
 
 export interface CliIo {
+  /** Takes a screenshot of a page. Default: the Playwright CLI through npx, so the CLI itself depends on no browser. */
+  screenshot?: (url: string, path: string) => Promise<void>;
   env: Record<string, string | undefined>;
   fetch: typeof fetch;
   stdout: (text: string) => void;
@@ -88,7 +90,7 @@ Usage:
       Machine-translate your own banner and category copy into the languages it lacks, on the
       site's connected translation account (see cookies translation). Never overwrites text a
       person wrote. --dry-run calls no provider.
-  cookiemunch preview --site <cbid> [--url <page>] [--region <eu|de|us-ca…>] [--lang <de…>]
+  cookiemunch preview --site <cbid> [--url <page>] [--screenshot <out.png>] [--region <eu|de|us-ca…>] [--lang <de…>]
                       [--ttl <seconds>] [--open]
       Print (and with --open, open) a link showing the banner as a visitor in that
       region and language sees it. Works in headless browsers; nothing is recorded.
@@ -253,7 +255,15 @@ Usage:
       features, never billed; its keys are test keys and its rights requests are all tests.
       create makes it (or reuses it) and prints a new key for it alone; delete erases it and
       everything in it, after asking. create and delete need a full-access key or orgs:create.
-  cookiemunch plan [cookiemunch.json] [--exit-code] [--json]
+  cookiemunch init [--framework next] (--site <cbid> | --domain <d>) [--out cookiemunch.json] [--dry-run]
+      Make or pick the site, write cookiemunch.json, and print the tag, CSP and footer link to add.
+  cookiemunch executors connect <chatly|forumulate|referalli|preset> --site <cbid> [--external-id <id>]
+      [--org-id <id>] [--key-env <VAR>] [--dry-run]
+      One route: the partner mints the key; with --key-env, your key from that variable. Ends in a
+      connection, or the one human step and the command to run after it.
+  cookiemunch executors activate <id>
+      A connection registered before its API was live (state "pending"): runs conformance, then activates.
+  cookiemunch plan [cookiemunch.json] [--detail] [--exit-code] [--json]
   cookiemunch apply [cookiemunch.json] [--secret-env NAME] [--secrets-out <file>]
       One file for a site: {site, config, cookies, presets, executors, webhooks, rightsPage,
       partners}, no secrets. plan prints the server's dry run of every part ("No changes" when
@@ -299,7 +309,7 @@ interface Parsed {
   flags: Record<string, string | true>;
 }
 
-const BOOLEAN_FLAGS = new Set(['replace', 'exit-code', 'open', 'help', 'json', 'yes', 'strict', 'wait', 'canary', 'dry-run', 'clear-name', 'revoke-atlas-id-grant', 'with-cbid', 'without-cbid', 'cleanup', 'verify']);
+const BOOLEAN_FLAGS = new Set(['replace', 'exit-code', 'open', 'help', 'json', 'yes', 'strict', 'wait', 'canary', 'dry-run', 'clear-name', 'revoke-atlas-id-grant', 'with-cbid', 'without-cbid', 'cleanup', 'verify', 'detail', 'presets-only', 'defer', 'fix-plan']);
 
 export function parseArgs(argv: string[]): Parsed {
   const positional: string[] = [];
@@ -365,7 +375,7 @@ function proposed(current: Record<string, unknown>, file: Record<string, unknown
 }
 
 /** This package's version, sent in the default User-Agent (a test pins it to package.json). */
-export const CLI_VERSION = '0.15.0';
+export const CLI_VERSION = '0.16.0';
 
 /** `COOKIEMUNCH_USER_AGENT`, else `cookiemunch-cli/<version>`. */
 function userAgent(io: CliIo): string {
@@ -488,6 +498,14 @@ async function configCommand(sub: string | undefined, p: Parsed, io: CliIo, clie
   throw new UsageError(`unknown config command: ${sub ?? '(none)'} — use pull, diff, push or validate`);
 }
 
+/** A preview token shows the banner to a headless browser, which otherwise sees none (bots.suppress). */
+async function playwrightScreenshot(url: string, path: string): Promise<void> {
+  const { execFile } = await import('node:child_process');
+  await new Promise<void>((resolve, reject) => {
+    execFile('npx', ['--yes', 'playwright', 'screenshot', '--wait-for-timeout=3000', url, path], { timeout: 180_000 }, (e) => (e ? reject(e) : resolve()));
+  });
+}
+
 async function previewCommand(p: Parsed, io: CliIo, client: CookieMunchClient): Promise<number> {
   const cbid = requireSite(p, io);
   const ttl = str(p.flags, 'ttl');
@@ -512,6 +530,17 @@ async function previewCommand(p: Parsed, io: CliIo, client: CookieMunchClient): 
   }
   io.stderr(`Valid until ${new Date(r.expiresAt).toISOString()}.\n`);
   if (p.flags.open === true && r.previewUrl) await io.openUrl(r.previewUrl);
+  const shot = str(p.flags, 'screenshot');
+  if (shot) {
+    if (!r.previewUrl) throw new UsageError('--screenshot needs a page: pass --url');
+    try {
+      await (io.screenshot ?? playwrightScreenshot)(r.previewUrl, shot);
+      io.stderr(`Wrote ${shot}.\n`);
+    } catch (e) {
+      io.stderr(`No screenshot: ${(e as Error).message}\nIt needs a browser once: npx playwright install chromium\n`);
+      return 1;
+    }
+  }
   return 0;
 }
 
@@ -662,15 +691,17 @@ async function executorsCommand(
 }
 
 /** One rule per line: PASS/FAIL/SKIP, its id, and what was seen when it did not pass. */
-function printConformance(io: CliIo, report: { ok: boolean; passed: number; failed: number; skipped: number; rules: Array<{ id: string; title: string; status: string; detail?: string }> }, asJson: boolean): number {
+function printConformance(io: CliIo, report: { ok: boolean; passed: number; failed: number; skipped: number; blocked?: number; fix?: string; rules: Array<{ id: string; title: string; status: string; detail?: string }> }, asJson: boolean): number {
   if (asJson) {
     io.stdout(`${JSON.stringify(report, null, 2)}\n`);
   } else {
+    if (report.fix) io.stdout(`FIX: ${report.fix}\n\n`);
     for (const r of report.rules) {
+      if (r.status === 'blocked') continue;
       io.stdout(`${r.status.toUpperCase().padEnd(4)}  ${r.id}  ${r.title}\n`);
       if (r.detail && r.status !== 'pass') io.stdout(`      ${r.detail}\n`);
     }
-    io.stdout(`\n${report.passed} passed, ${report.failed} failed, ${report.skipped} skipped\n`);
+    io.stdout(`\n${report.passed} passed, ${report.failed} failed, ${report.skipped} skipped${report.blocked ? `, ${report.blocked} blocked by the failure above` : ''}\n`);
   }
   return report.ok ? 0 : 1;
 }
@@ -989,6 +1020,9 @@ export async function run(argv: string[], io: CliIo): Promise<number> {
     if (cmd === 'cookies' && (sub === 'diff' || sub === 'push')) return await cookiesFileCommand(sub, io, client, ops);
     if (cmd === 'executors' && (sub === 'pull' || sub === 'diff' || sub === 'push')) return await executorsFileCommand(sub, io, client, ops);
     if (cmd === 'dsar' && sub === 'test') return await dsarTestCommand(io, client, ops);
+    if (cmd === 'executors' && sub === 'connect') return await executorConnectCommand(io, client, ops);
+    if (cmd === 'executors' && sub === 'activate') return await executorActivateCommand(io, client, ops);
+    if (cmd === 'init') return await initCommand(io, client, ops);
     if (cmd === 'doctor') return await doctorCommand(io, client, ops, CLI_VERSION);
     if (cmd === 'keys' && sub && sub !== 'report') return await keysExtraCommand(sub, io, client, ops);
     if (cmd === 'sandbox') return await sandboxCommand(sub, io, client, ops);

@@ -186,3 +186,90 @@ describe('plan|apply cookiemunch.json (CMU-D12)', () => {
     expect(await run(['apply', 'b.json'], harness({ files: { 'b.json': b4 }, respond }).io)).toBe(2);
   });
 });
+
+describe('executors connect (one route)', () => {
+  it('mints through the partner and says the scope', async () => {
+    const h = harness({ respond: (c) => (c.url.includes('/v1/dsar/executors') ? { status: 201, body: { id: 'e1', system: 'chatly' } } : undefined) as never });
+    expect(await run(['executors', 'connect', 'chatly', '--site', 'c1', '--external-id', 'ws1'], h.io)).toBe(0);
+    expect(h.calls[0]!.body).toEqual({ preset: 'chatly', cbid: 'c1', mintFrom: 'chatly', externalId: 'ws1' });
+    expect(h.out()).toMatch(/Scoped to c1/);
+  });
+
+  it('a refused mint ends in the human step and the command to run after it', async () => {
+    const h = harness({ respond: (c) => (c.url.includes('/v1/dsar/executors') ? { status: 502, body: { error: 'Chatly answered 403 (no_attributable_owner)', code: 'partner_mint_failed', humanStep: 'sign in to chatly' } } : undefined) as never });
+    expect(await run(['executors', 'connect', 'chatly', '--site', 'c1'], h.io)).toBe(1);
+    expect(h.err()).toMatch(/Do this: sign in to chatly/);
+    expect(h.err()).toMatch(/--key-env CHATLY_KEY/);
+  });
+
+  it('--key-env sends the key, and a dry run stores nothing', async () => {
+    const h = harness({ env: { CK: 'sk_abc' }, respond: (c) => (c.url.includes('/v1/dsar/executors') ? { status: 200, body: { dryRun: true, executor: {}, diff: [] } } : undefined) as never });
+    expect(await run(['executors', 'connect', 'chatly', '--site', 'c1', '--key-env', 'CK', '--dry-run'], h.io)).toBe(0);
+    expect(h.calls[0]!.url).toContain('dryRun=1');
+    expect(h.calls[0]!.body).toEqual({ preset: 'chatly', cbid: 'c1', secretKey: 'sk_abc' });
+  });
+});
+
+describe('plan: preset drift', () => {
+  const bundle = (pinned = false) => JSON.stringify({ site: { cbid: 'c1' }, presets: [{ vendor: 'atlas', ...(pinned ? { pinned: true } : {}) }] });
+  const drifted = (c: Call) => (c.url.includes('/cookies/presets/atlas') ? { status: 200, body: { dryRun: true, diff: { added: ['__session'], removed: [], changed: [] }, upstream: { applied: '2026-10-01', latest: '2026-11-05' } } } : undefined);
+
+  it('names the move, lists rows with --detail, and exits 3 when only presets drifted', async () => {
+    const h = harness({ files: { 'c.json': bundle() }, respond: drifted as never });
+    expect(await run(['plan', 'c.json', '--detail', '--exit-code'], h.io)).toBe(3);
+    expect(h.out()).toMatch(/preset atlas: 1 declaration change\(s\) \(manifest 2026-10-01 -> 2026-11-05\)/);
+    expect(h.out()).toMatch(/\+ atlas: __session/);
+  });
+
+  it('a pinned preset is reported, is not a change, and exits 0', async () => {
+    const h = harness({ files: { 'c.json': bundle(true) }, respond: drifted as never });
+    expect(await run(['plan', 'c.json', '--exit-code'], h.io)).toBe(0);
+    expect(h.out()).toMatch(/pinned, 1 upstream change\(s\) not followed/);
+  });
+});
+
+describe('conformance output', () => {
+  it('prints the fix first and hides blocked rows', async () => {
+    const report = { conformance: true, canary: true, email: 'x', ok: false, passed: 1, failed: 1, skipped: 0, blocked: 13, code: 'missing_scope', required: ['privacy:execute'], fix: 'It needs privacy:execute.', rules: [
+      { id: 'auth.required', title: 't', status: 'pass' }, { id: 'lookup.email.found', title: 't', status: 'fail', detail: 'HTTP 403' }, { id: 'version.header', title: 't', status: 'blocked', blockedBy: 'lookup.email.found' },
+    ] };
+    const h = harness({ respond: (c) => (c.url.includes('/test') ? { status: 200, body: report } : undefined) as never });
+    expect(await run(['executors', 'conformance', '--connection', 'e1'], h.io)).toBe(1);
+    expect(h.out().startsWith('FIX: It needs privacy:execute.')).toBe(true);
+    expect(h.out()).not.toMatch(/version\.header/);
+    expect(h.out()).toMatch(/13 blocked by the failure above/);
+  });
+});
+
+describe('init and doctor --fix-plan', () => {
+  it('init detects Next, writes the file and prints the lines to add', async () => {
+    const h = harness({ files: { 'package.json': JSON.stringify({ dependencies: { next: '15' } }) } });
+    expect(await run(['init', '--site', 'c1'], h.io)).toBe(0);
+    expect(JSON.parse(h.written['cookiemunch.json']!).site.cbid).toBe('c1');
+    expect(h.out()).toMatch(/CookieMunchScript cbid="c1"/);
+  });
+
+  it('--fix-plan lists the open steps in order', async () => {
+    const h = harness({ respond: (c) => {
+      if (c.url.endsWith('/v1/me')) return { status: 200, body: { orgId: 'o', rights: { warningDetails: [{ code: 'chatly_no_connection', message: 'm', fix: 'Connect Chatly.', requiredScopes: ['privacy:execute'] }] } } };
+      if (c.url.endsWith('/v1/dsar/executors')) return { status: 200, body: [{ id: 'e1', system: 'mine', state: 'awaiting_first_probe' }] };
+      return { status: 500, body: {} };
+    } });
+    await run(['doctor', '--fix-plan'], h.io);
+    expect(h.out()).toMatch(/1\. Connect Chatly\. \(key needs privacy:execute\)\n2\. Deploy mine's rights API, then: cookiemunch executors activate e1/);
+  });
+});
+
+describe('preview --screenshot', () => {
+  const token = (c: Call) => (c.url.includes('/preview') ? { status: 200, body: { token: 't', previewUrl: 'https://a.example/?cm_preview=t', expiresAt: 1 } } : undefined);
+  it('saves the page, and a missing browser says how to get one', async () => {
+    const h = harness({ respond: token as never });
+    const shots: string[] = [];
+    h.io.screenshot = async (u, p) => { shots.push(`${u} ${p}`); };
+    expect(await run(['preview', '--site', 'c1', '--url', 'https://a.example', '--screenshot', 'b.png'], h.io)).toBe(0);
+    expect(shots).toEqual(['https://a.example/?cm_preview=t b.png']);
+    h.io.screenshot = async () => { throw new Error('no chromium'); };
+    expect(await run(['preview', '--site', 'c1', '--url', 'https://a.example', '--screenshot', 'b.png'], h.io)).toBe(1);
+    expect(h.err()).toMatch(/playwright install chromium/);
+  });
+});

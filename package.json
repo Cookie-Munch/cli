@@ -1,13 +1,14 @@
 {
   "name": "@cookiemunch/cli",
-  "version": "0.15.0",
+  "version": "0.16.0",
   "description": "cookiemunch — config as code, banner previews and connection tests from a terminal or CI, over the Cookie Munch Developer API",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
-    "cookiemunch": "./dist/bin.js"
+    "cookiemunch": "./dist/bin.js",
+    "cm": "./dist/bin.js"
   },
   "exports": {
     ".": {
@@ -35,7 +36,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@cookiemunch/sdk": "^0.18.0"
+    "@cookiemunch/sdk": "^0.19.0"
   },
   "homepage": "https://cookiemunch.net/docs",
   "bugs": {

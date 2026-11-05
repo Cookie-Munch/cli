@@ -11,10 +11,11 @@
  *   cookiemunch sandbox [show] | create [--key-name n] | delete [--yes]
  *   cookiemunch plan|apply <cookiemunch.json>
  *
- * Exit codes everywhere: 0 ok (or no changes), 1 a difference, a failure or a failed check, 2 a usage mistake.
+ * Exit codes everywhere: 0 ok (or no changes), 1 a difference, a failure or a failed check, 2 a usage mistake,
+ * 3 from `plan --exit-code` when the only difference is upstream preset drift.
  */
 
-import type { CookieMunchClient, DsarExecutor } from '@cookiemunch/sdk';
+import { CookieMunchApiError, type CookieMunchClient, type DsarExecutor } from '@cookiemunch/sdk';
 import type { CliIo } from './cli.js';
 import { diffJson, formatChanges, notKept, type Change, type Json } from './diff.js';
 
@@ -88,7 +89,7 @@ export async function cookiesFileCommand(sub: 'diff' | 'push', io: CliIo, client
 // ---- executors pull|diff|push <file> (CMU-D11) ----
 
 /** What a file holds for a connection: everything that is not a secret, an id the server assigns, or state. */
-const EXECUTOR_FIELDS = ['system', 'baseUrl', 'profile', 'auto', 'subjectNote', 'cbid', 'preset', 'presetVersion', 'presetParams'] as const;
+const EXECUTOR_FIELDS = ['system', 'baseUrl', 'profile', 'auto', 'subjectNote', 'cbid', 'runAfter', 'preset', 'presetVersion', 'presetParams'] as const;
 function executorFileView(e: DsarExecutor): Record<string, Json> {
   const out: Record<string, Json> = { id: e.id };
   for (const k of EXECUTOR_FIELDS) {
@@ -117,7 +118,8 @@ export async function executorsFileCommand(sub: 'pull' | 'diff' | 'push', io: Cl
   const plan: Array<{ system: string; action: 'create' | 'update' | 'unchanged'; id?: string; changes: Change[] }> = [];
   for (const w of wanted) {
     const match = current.find((c) => (w.id && c.id === w.id) || (!w.id && c.system === w.system));
-    const { id: _i, ...want } = w;
+    // `state` says how a new connection starts; it is not something to diff against a live one.
+    const { id: _i, state: _s, ...want } = w;
     if (!match) { plan.push({ system: String(w.system), action: 'create', changes: diffJson({}, want as Json) }); continue; }
     const { id, ...have } = match;
     const changes = diffJson(Object.fromEntries(Object.keys(want).map((k) => [k, have[k] ?? null])) as Json, want as Json);
@@ -142,7 +144,7 @@ export async function executorsFileCommand(sub: 'pull' | 'diff' | 'push', io: Cl
     } else {
       const secretKey = secretEnv ? io.env[secretEnv] : undefined;
       if (!secretKey) throw h.usage(`creating ${p.system} needs its API key: set --secret-env NAME and export NAME`);
-      await client.fulfillment.connectExecutor({ ...(body as object), secretKey } as never);
+      await client.fulfillment.connectExecutor({ ...(body as object), ...(h.flag('defer') === true ? { state: 'pending' } : {}), secretKey } as never);
     }
   }
   io.stderr(`Applied ${pending.length} change(s).\n`);
@@ -239,8 +241,29 @@ export async function doctorCommand(io: CliIo, client: CookieMunchClient, h: Ops
       checks.push({ check: 'presets', ok: null, detail: (e as Error).message });
     }
   }
-  if (json(h)) print(io, { ok: checks.every((c) => c.ok !== false), checks });
-  else for (const c of checks) io.stdout(`${c.ok === true ? 'ok  ' : c.ok === false ? 'FAIL' : '--  '} ${c.check}: ${c.detail}\n`);
+  // --fix-plan: every step still open, in the order to do them.
+  const steps: string[] = [];
+  if (h.flag('fix-plan') === true) {
+    const rights = (me as unknown as { rights?: { warningDetails?: Array<{ message: string; fix: string; requiredScopes?: string[] }> } } | null)?.rights;
+    for (const w of rights?.warningDetails ?? []) steps.push(`${w.fix}${w.requiredScopes?.length ? ` (key needs ${w.requiredScopes.join(' or ')})` : ''}`);
+    try {
+      for (const e of await client.fulfillment.executors()) {
+        if (e.state) steps.push(`Deploy ${e.system}'s rights API, then: cookiemunch executors activate ${e.id}`);
+      }
+    } catch { /* a key without dsar:read: the health rows below still say what they can */ }
+    try {
+      const health = await client.integrationHealth(site);
+      for (const c of health.checks ?? []) if (c.ok === false && c.fixHint) steps.push(`${c.subject ? `${c.subject}: ` : ''}${c.fixHint}`);
+    } catch { /* already reported as a check above */ }
+  }
+  if (json(h)) print(io, { ok: checks.every((c) => c.ok !== false), checks, ...(h.flag('fix-plan') === true ? { fixPlan: steps } : {}) });
+  else {
+    for (const c of checks) io.stdout(`${c.ok === true ? 'ok  ' : c.ok === false ? 'FAIL' : '--  '} ${c.check}: ${c.detail}\n`);
+    if (h.flag('fix-plan') === true) {
+      io.stdout(steps.length ? '\nStill to do, in order:\n' : '\nNothing left to do.\n');
+      steps.forEach((s, i) => io.stdout(`${i + 1}. ${s}\n`));
+    }
+  }
   return checks.some((c) => c.ok === false) ? 1 : 0;
 }
 
@@ -321,7 +344,8 @@ interface Bundle {
   site?: { cbid?: string; domain?: string; name?: string; aliases?: string[] };
   config?: Record<string, unknown>;
   cookies?: Array<Record<string, unknown> & { name: string }>;
-  presets?: Array<{ vendor: string; params?: Record<string, unknown> }>;
+  /** `pinned`: this site does not follow the preset; plan reports upstream changes and apply leaves them. */
+  presets?: Array<{ vendor: string; params?: Record<string, unknown>; pinned?: boolean }>;
   executors?: Array<Record<string, Json>>;
   /** `secretEnv` names an environment variable holding a signing secret you chose; the file never holds one. */
   webhooks?: Array<{ url: string; events: string[]; cbid?: string | null; secretEnv?: string }>;
@@ -331,7 +355,7 @@ interface Bundle {
 
 const PARTS = ['site', 'config', 'cookies', 'presets', 'rightsPage', 'executors', 'webhooks', 'partners'] as const;
 type Part = (typeof PARTS)[number];
-interface PartPlan { part: Part; changes: number; detail: string[]; notApplied?: string[]; apply?: () => Promise<string> }
+interface PartPlan { part: Part; changes: number; detail: string[]; rows?: string[]; info?: string[]; notApplied?: string[]; apply?: () => Promise<string> }
 
 /**
  * One file for everything a site's privacy setup is (CMU-D12). `plan` asks the server's dry run of every part
@@ -368,9 +392,22 @@ export async function bundleCommand(sub: 'plan' | 'apply', io: CliIo, client: Co
   }
   for (const p of b.presets ?? []) {
     const r = await client.sites.applyCookiePreset(cbid, p.vendor as never, (p.params ?? {}) as never, { dryRun: true });
-    const d = (r as { diff?: { added: unknown[]; removed: unknown[]; changed: unknown[] } }).diff;
+    const d = (r as { diff?: { added: unknown[]; removed: unknown[]; changed: Array<{ name?: string; before?: unknown; after?: unknown }> } }).diff;
     const n = d ? d.added.length + d.removed.length + d.changed.length : 0;
-    plans.push({ part: 'presets', changes: n, detail: n ? [`${p.vendor}: ${n} declaration change(s)`] : [], apply: async () => { await client.sites.applyCookiePreset(cbid, p.vendor as never, (p.params ?? {}) as never); return `preset ${p.vendor} applied`; } });
+    const up = (r as { upstream?: { applied: string | null; latest: string } }).upstream;
+    const moved = up && up.applied !== up.latest ? ` (manifest ${up.applied ?? 'not applied yet'} -> ${up.latest})` : '';
+    const rowName = (x: unknown) => (typeof x === 'string' ? x : String((x as { name?: unknown }).name));
+    const rows = d ? [
+      ...d.added.map((c) => `+ ${p.vendor}: ${rowName(c)}`),
+      ...d.removed.map((c) => `- ${p.vendor}: ${rowName(c)}`),
+      ...d.changed.map((c) => `~ ${p.vendor}: ${c.name}: ${formatChanges(diffJson(c.before as Json, c.after as Json))}`),
+    ] : [];
+    // A pinned preset never counts as a change: it is reported, and apply has nothing to do for it.
+    if (p.pinned) {
+      plans.push({ part: 'presets', changes: 0, detail: [], rows, info: n ? [`preset ${p.vendor}: pinned, ${n} upstream change(s) not followed${moved}`] : [`preset ${p.vendor}: pinned`] });
+      continue;
+    }
+    plans.push({ part: 'presets', changes: n, detail: n ? [`preset ${p.vendor}: ${n} declaration change(s)${moved}`] : [], rows, apply: async () => { await client.sites.applyCookiePreset(cbid, p.vendor as never, (p.params ?? {}) as never); return `preset ${p.vendor} applied`; } });
   }
   if (b.rightsPage) {
     const r = await client.rightsPage.dryRun(cbid, b.rightsPage, { mode: 'put' });
@@ -378,17 +415,26 @@ export async function bundleCommand(sub: 'plan' | 'apply', io: CliIo, client: Co
     plans.push({ part: 'rightsPage', changes: diff.length, detail: diff.map((d) => d.path), apply: async () => { await client.rightsPage.put(cbid, b.rightsPage as never); return 'rights page draft saved (publish it with cookiemunch rights-page publish)'; } });
   }
   if (b.executors) {
-    const current = (await client.fulfillment.executors()).map(executorFileView);
+    const live = await client.fulfillment.executors();
+    const current = live.map(executorFileView);
     let n = 0;
     const detail: string[] = [];
+    const rows: string[] = [];
+    const info: string[] = [];
     for (const w of b.executors) {
       for (const k of ['secretKey', 'secret', 'webhookSecret']) if (k in w) throw h.usage(`${path}: executors carry no secrets (${k}); use --secret-env`);
       const m = current.find((c) => c.system === w.system);
-      const { id: _i, ...want } = w;
+      const { id: _i, state: _s, ...want } = w;
       const changes = m ? diffJson(Object.fromEntries(Object.keys(want).map((k) => [k, m[k] ?? null])) as Json, want as Json) : diffJson({}, want as Json);
-      if (changes.length) { n++; detail.push(`${m ? 'update' : 'create'} ${String(w.system)}`); }
+      if (changes.length) { n++; detail.push(`${m ? 'update' : 'create'} ${String(w.system)}`); rows.push(`${String(w.system)}: ${formatChanges(changes)}`); }
+      const e = live.find((x) => x.system === w.system) as unknown as { id: string; preset?: string; presetVersion?: number; presetLatestVersion?: number; presetPinned?: boolean } | undefined;
+      if (e?.preset && e.presetVersion !== undefined && e.presetLatestVersion !== undefined && e.presetVersion < e.presetLatestVersion) {
+        info.push(e.presetPinned
+          ? `preset ${e.preset}: pinned at v${e.presetVersion} (presetPinned), not following v${e.presetLatestVersion}`
+          : `preset ${e.preset}: v${e.presetVersion} -> v${e.presetLatestVersion} available (cookiemunch executors upgrade-preset ${e.id})`);
+      }
     }
-    plans.push({ part: 'executors', changes: n, detail, apply: async () => { await executorsFileCommand('push', io, client, { ...h, positional: ['executors', 'push', path], readJson: async () => ({ executors: b.executors }) }); return 'executors pushed'; } });
+    plans.push({ part: 'executors', changes: n, detail, rows, info, apply: async () => { await executorsFileCommand('push', io, client, { ...h, positional: ['executors', 'push', path], readJson: async () => ({ executors: b.executors }) }); return 'executors pushed'; } });
   }
   if (b.webhooks) {
     for (const w of b.webhooks) if ('secret' in w) throw h.usage(`${path}: webhooks carry no secrets; name an environment variable with secretEnv`);
@@ -426,21 +472,131 @@ export async function bundleCommand(sub: 'plan' | 'apply', io: CliIo, client: Co
     else for (const p of plans) {
       io.stdout(`${p.part}: ${p.changes ? `${p.changes} change(s)` : 'No changes'}\n`);
       for (const d of p.detail) io.stdout(`  ${d}\n`);
+      for (const d of p.info ?? []) io.stdout(`  ${d}\n`);
+      if (h.flag('detail') === true) for (const d of p.rows ?? []) io.stdout(`    ${d}\n`);
       for (const d of p.notApplied ?? []) io.stdout(`  not applied: ${d} (the server's dry run does not keep it)\n`);
     }
     const unapplied = plans.reduce((n, p) => n + (p.notApplied?.length ?? 0), 0);
     if (!json(h)) io.stderr(total ? `${total} change(s) in ${plans.filter((p) => p.changes).length} part(s). Apply with: cookiemunch apply ${path}\n` : unapplied ? '' : `No changes: all ${plans.length} part(s) match.\n`);
     if (unapplied && !json(h)) io.stderr(`${unapplied} field(s) in ${path} would not be applied.\n`);
-    return (total || unapplied) && h.flag('exit-code') === true ? 1 : 0;
+    if (h.flag('exit-code') !== true) return 0;
+    const local = plans.filter((p) => p.part !== 'presets').reduce((n, p) => n + p.changes, 0);
+    if (local || unapplied) return 1;
+    // 3, not the local-drift 1 (and not 2, which is a usage mistake): only upstream presets moved.
+    return total ? 3 : 0;
   }
   const log: Array<{ part: Part; at: string; result: string }> = [];
   for (const p of plans) {
     if (!p.changes || !p.apply) continue;
+    if (h.flag('presets-only') === true && p.part !== 'presets') continue;
     const result = await p.apply();
     log.push({ part: p.part, at: new Date().toISOString(), result });
     if (!json(h)) io.stderr(`${log[log.length - 1]!.at} ${p.part}: ${result}\n`);
   }
   if (json(h)) print(io, { file: path, cbid, applied: log });
   else if (!log.length) io.stderr('No changes: nothing to apply.\n');
+  return 0;
+}
+
+// ---- executors connect | activate (one route for partner connections) ----
+
+const errorBody = (e: unknown) => (e instanceof CookieMunchApiError && e.body && typeof e.body === 'object' ? (e.body as Record<string, unknown>) : {});
+
+/** Mints through the partner, or registers --key-env's key. Ends in a connection, or the one human step and what to run after it. */
+export async function executorConnectCommand(io: CliIo, client: CookieMunchClient, h: OpsHelpers): Promise<number> {
+  const name = h.positional[2];
+  if (!name) throw h.usage('usage: cookiemunch executors connect <chatly|forumulate|referalli|preset> --site <cbid> [--external-id <id>] [--org-id <id>] [--key-env <VAR>] [--dry-run]');
+  const cbid = h.requireSite();
+  const keyEnv = str(h, 'key-env');
+  const secretKey = keyEnv ? io.env[keyEnv] : undefined;
+  if (keyEnv && !secretKey) throw h.usage(`the environment variable ${keyEnv} is empty`);
+  const externalId = str(h, 'external-id');
+  const orgId = str(h, 'org-id');
+  const body = {
+    preset: name, cbid,
+    ...(orgId ? { orgId } : {}),
+    ...(secretKey ? { secretKey } : { mintFrom: name, ...(externalId ? { externalId } : {}) }),
+  };
+  const fallback = `cookiemunch executors connect ${name} --site ${cbid}${orgId ? ` --org-id ${orgId}` : ''} --key-env ${name.toUpperCase()}_KEY`;
+  const scope = `Scoped to ${cbid}: only requests carrying cbid ${cbid} reach it. POST /v1/dsar defaults cbid only when the org has one site.`;
+  try {
+    if (h.flag('dry-run') === true) {
+      const r = await client.fulfillment.dryRunConnectExecutor(body as never);
+      if (json(h)) print(io, r);
+      else {
+        io.stdout(`Would connect ${name}${secretKey ? ` with the key in ${keyEnv}` : `: ${name} mints the key`}.\n${scope}\n`);
+        for (const w of (r as { warnings?: unknown[] }).warnings ?? []) io.stderr(`warning: ${JSON.stringify(w)}\n`);
+      }
+      return 0;
+    }
+    const r = await client.fulfillment.connectExecutor(body as never);
+    if (json(h)) { print(io, r); return 0; }
+    io.stdout(`Connected ${r.system} (${r.id}).\n${scope}\n`);
+    if (r.completionSecret) io.stdout(`completionSecret: ${r.completionSecret} (shown once: store it)\n`);
+    io.stderr(`Check it: cookiemunch executors conformance --connection ${r.id}\n`);
+    return 0;
+  } catch (e) {
+    if (!(e instanceof CookieMunchApiError) || ![400, 403, 409, 502].includes(e.status)) throw e;
+    const b = errorBody(e);
+    if (json(h)) { print(io, { connected: false, status: e.status, code: e.code, error: e.message, ...b, nextCommand: fallback }); return 1; }
+    io.stderr(`Not connected: ${e.message}\n`);
+    if (b.acceptedFields && e.status === 400 && secretKey) return 1;
+    if (typeof b.humanStep === 'string') io.stderr(`Do this: ${b.humanStep}\n`);
+    if (!secretKey) io.stderr(`Then run: ${fallback}\n`);
+    return 1;
+  }
+}
+
+export async function executorActivateCommand(io: CliIo, client: CookieMunchClient, h: OpsHelpers): Promise<number> {
+  const id = h.positional[2];
+  if (!id) throw h.usage('usage: cookiemunch executors activate <id>');
+  try {
+    await client.fulfillment.updateExecutor(id, { state: 'active' } as never);
+    io.stdout(`${id} is active.\n`);
+    return 0;
+  } catch (e) {
+    if (!(e instanceof CookieMunchApiError) || e.status !== 422) throw e;
+    io.stderr(`Still pending: ${e.message}\n`);
+    return 1;
+  }
+}
+
+// ---- init (one file and the lines to add) ----
+
+export async function initCommand(io: CliIo, client: CookieMunchClient, h: OpsHelpers): Promise<number> {
+  const out = str(h, 'out') ?? 'cookiemunch.json';
+  const domain = str(h, 'domain');
+  const given = h.site();
+  if (!given && !domain) throw h.usage('usage: cookiemunch init (--site <cbid> | --domain <d>) [--framework next] [--out cookiemunch.json] [--dry-run]');
+  let framework = str(h, 'framework');
+  if (!framework) {
+    try {
+      const pkg = JSON.parse(await io.readFile('package.json')) as { dependencies?: Record<string, string>; devDependencies?: Record<string, string> };
+      if (pkg.dependencies?.next || pkg.devDependencies?.next) framework = 'next';
+    } catch { /* no package.json: the plain tag */ }
+  }
+  const dry = h.flag('dry-run') === true;
+  const cbid = given ?? (dry ? '<new site>' : (await client.sites.create({ domain: domain! } as never)).cbid);
+  const file = `${JSON.stringify({ site: { cbid }, presets: [], cookies: [], executors: [] }, null, 2)}\n`;
+  if (dry) io.stderr(`Would write ${out}.\n`);
+  else { await io.writeFile(out, file); io.stderr(`Wrote ${out}.\n`); }
+  io.stdout(framework === 'next'
+    ? `Add to the root layout, before other scripts (npm i @cookiemunch/next):
+  CookieMunchScript and CookieSettingsLink, both from @cookiemunch/next
+  <CookieMunchScript cbid="${cbid}" />
+  <CookieSettingsLink />  in the footer
+Print the Content-Security-Policy for next.config with: cookiemunch csp --framework next
+Gate code on consent: hasConsent('statistics'), onConsentChange(fn).
+`
+    : `Add first in <head>:
+  <script src="https://cdn.cookiemunch.net/consent.js" data-cbid="${cbid}"></script>
+Add a footer link that calls CookieMunch.showSettings().
+Print your Content-Security-Policy rows with: cookiemunch csp
+`);
+  io.stdout(`Then:
+  cookiemunch plan ${out}
+  cookiemunch apply ${out}
+  cookiemunch doctor --site ${cbid} --fix-plan
+`);
   return 0;
 }
