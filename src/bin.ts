@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /** The `cookiemunch` executable: real I/O around run() (see cli.ts). */
 
-import { readdir, readFile, writeFile } from 'node:fs/promises';
+import { access, constants, readdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { dirname } from 'node:path';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline/promises';
 import { run } from './cli.js';
@@ -58,6 +59,12 @@ run(process.argv.slice(2), {
   stderr: (t) => process.stderr.write(t),
   readFile: (p) => readFile(p, 'utf8'),
   writeFile: (p, d, mode) => writeFile(p, d, { encoding: 'utf8', ...(mode !== undefined ? { mode } : {}) }),
+  // Throws what the write itself would: EISDIR, ENOENT, EACCES.
+  checkWritable: async (p) => {
+    const found = await stat(p).catch((e: NodeJS.ErrnoException) => { if (e.code === 'ENOENT') return null; throw e; });
+    if (found?.isDirectory()) throw new Error(`${p} is a directory`);
+    await access(found ? p : dirname(p), found ? constants.R_OK | constants.W_OK : constants.W_OK);
+  },
   openUrl,
   listFiles,
   ...(process.stdin.isTTY && process.stderr.isTTY ? { confirm } : {}),

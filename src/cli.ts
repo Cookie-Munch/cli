@@ -53,6 +53,8 @@ export interface CliIo {
   stdout: (text: string) => void;
   stderr: (text: string) => void;
   readFile: (path: string) => Promise<string>;
+  /** Throws when `path` could not be written, without touching it. Asked before an action a failed write would strand. */
+  checkWritable?: (path: string) => Promise<void>;
   /** `mode` is the file mode for a new file (0o600 for anything holding a secret). */
   writeFile: (path: string, data: string, mode?: number) => Promise<void>;
   /** Open a URL in the user's browser. */
@@ -219,8 +221,9 @@ Usage:
   cookiemunch keys report [--unused-days <n>] [--expiring-days <n>] [--json]
       Key hygiene: keys unused for n days (default 90), keys with broad access, and
       keys expiring within n days (default 14). Needs a full-access key.
-  cookiemunch partners list|link|unlink --site <cbid> [--partner <id>] [--dry-run]
-                       [--external-id <id>] [--label <text>] [<linkId>]
+  cookiemunch partners list --site <cbid>
+  cookiemunch partners link --site <cbid> --partner <id> [--external-id <id>] [--label <text>] [--dry-run]
+  cookiemunch partners unlink <linkId> --site <cbid>
       Grant a partner platform the site's consent events (no secret is created), list
       the grants, or revoke one. Any partner this deployment knows (forumulate, atlas, chatly,
       referalli, or one registered for it).
@@ -322,7 +325,7 @@ interface Parsed {
   flags: Record<string, string | true>;
 }
 
-const BOOLEAN_FLAGS = new Set(['replace', 'exit-code', 'open', 'help', 'json', 'yes', 'strict', 'wait', 'canary', 'dry-run', 'clear-name', 'revoke-atlas-id-grant', 'with-cbid', 'without-cbid', 'cleanup', 'verify', 'detail', 'presets-only', 'defer', 'fix-plan', 'no-verify']);
+export const BOOLEAN_FLAGS = new Set(['keep-old-domain', 'replace', 'exit-code', 'open', 'help', 'json', 'yes', 'strict', 'wait', 'canary', 'dry-run', 'clear-name', 'revoke-atlas-id-grant', 'with-cbid', 'without-cbid', 'cleanup', 'verify', 'detail', 'presets-only', 'defer', 'fix-plan', 'no-verify']);
 
 /** Every flag the help names. An unknown flag that is ignored is a setting someone believes they made. */
 const KNOWN_FLAGS = new Set([...USAGE.matchAll(/--([a-z][a-z-]*)/g)].map((m) => m[1]!));
@@ -387,7 +390,13 @@ export function parseArgs(argv: string[]): Parsed {
       const name = eq > 0 ? a.slice(2, eq) : a.slice(2);
       if (!KNOWN_FLAGS.has(name) && !BOOLEAN_FLAGS.has(name)) throw new UsageError(`unknown flag --${name}${RENAMED_FLAGS[name] ? `: use ${RENAMED_FLAGS[name]}` : ''}`);
       let value: string | true;
-      if (eq > 0) value = a.slice(eq + 1);
+      // --dry-run=true must never read as "not a dry run" and do the write.
+      if (eq > 0 && BOOLEAN_FLAGS.has(name)) {
+        const said = a.slice(eq + 1);
+        if (said === 'false') continue;
+        if (said !== 'true') throw new UsageError(`--${name} takes no value (or =true, =false), not "${said}"`);
+        value = true;
+      } else if (eq > 0) value = a.slice(eq + 1);
       else if (BOOLEAN_FLAGS.has(name)) value = true;
       else {
         const v = argv[i + 1];
@@ -416,14 +425,17 @@ function requireSite(p: Parsed, io: CliIo): string {
   return site;
 }
 
-async function readConfigFile(io: CliIo, path: string | undefined): Promise<Record<string, unknown>> {
-  if (!path) throw new UsageError('a config file is required');
-  let text: string;
+async function readText(io: CliIo, path: string): Promise<string> {
   try {
-    text = await io.readFile(path);
+    return await io.readFile(path);
   } catch (e) {
     throw new UsageError(`cannot read ${path}: ${(e as Error).message}`);
   }
+}
+
+async function readConfigFile(io: CliIo, path: string | undefined): Promise<Record<string, unknown>> {
+  if (!path) throw new UsageError('a config file is required');
+  const text = await readText(io, path);
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
@@ -440,7 +452,7 @@ function proposed(current: Record<string, unknown>, file: Record<string, unknown
 }
 
 /** This package's version, sent in the default User-Agent (a test pins it to package.json). */
-export const CLI_VERSION = '0.18.0';
+export const CLI_VERSION = '0.18.1';
 
 /** `COOKIEMUNCH_USER_AGENT`, else `cookiemunch-cli/<version>`. */
 function userAgent(io: CliIo): string {
@@ -658,15 +670,16 @@ async function executorsCommand(
     const headersFile = str(p.flags, 'headers-file');
     const bodyFile = str(p.flags, 'body-file');
     if (!headersFile || !bodyFile) throw new UsageError('--headers-file and --body-file are both required');
+    const headersText = await readText(io, headersFile);
     let headers: unknown;
     try {
-      headers = JSON.parse(await io.readFile(headersFile));
+      headers = JSON.parse(headersText);
     } catch {
       throw new UsageError(`${headersFile} is not a JSON object of header name to value`);
     }
     if (!isPlainObject(headers)) throw new UsageError(`${headersFile} is not a JSON object of header name to value`);
     // The body is sent exactly as read: the signature is over these bytes, so no trimming.
-    const body = await io.readFile(bodyFile);
+    const body = await readText(io, bodyFile);
     const r = await client.fulfillment.testExecutorWebhook(id, { headers: headers as Record<string, string>, body });
     io.stdout(`${JSON.stringify(r, null, 2)}\n`);
     return r.verified ? 0 : 1;
@@ -900,7 +913,7 @@ async function cookiesCommand(sub: string | undefined, p: Parsed, io: CliIo, cli
     const src = p.positional[2];
     const file = str(p.flags, 'file');
     if (!src && !file) throw new UsageError('a manifest URL (https://…/.well-known/<product>-embed.json) or --file <manifest.json> is required');
-    const input = file ? { manifest: JSON.parse(await io.readFile(file)) as never } : { url: src! };
+    const input = file ? { manifest: (await readConfigFile(io, file)) as never } : { url: src! };
     const r = await client.sites.importCookieManifest(cbid, input, dry);
     print(r);
     for (const s of r.skipped ?? []) io.stderr(`skipped ${s.name}: ${s.reason}\n`);

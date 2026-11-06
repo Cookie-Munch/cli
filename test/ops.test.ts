@@ -1,7 +1,7 @@
 /** CMU-B15, D11, D12, S02: version, cookies/executors as files, dsar test, doctor, keys vend, plan/apply, exit codes. */
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { run, CLI_VERSION, USAGE, COMMAND_FLAGS, flagNotTaken, strayWord } from '../src/cli.js';
+import { readdirSync, readFileSync } from 'node:fs';
+import { run, BOOLEAN_FLAGS, CLI_VERSION, USAGE, COMMAND_FLAGS, flagNotTaken, strayWord } from '../src/cli.js';
 import { parseTtl, systemFromUrl } from '../src/ops.js';
 import { harness, type Call } from './harness.js';
 
@@ -519,5 +519,26 @@ describe('the third retest', () => {
     expect(h.out()).toContain('0 error(s), 1 warning(s): cookies.undeclared. First fix: Declare them.');
     expect(await run(['doctor', '--fail-on', 'error'], harness({ respond }).io)).toBe(0);
     expect(await run(['doctor', '--fail-on', 'nope'], harness({ respond }).io)).toBe(2);
+  });
+});
+
+describe('flags read as switches', () => {
+  const source = readdirSync(new URL('../src/', import.meta.url)).filter((f) => f.endsWith('.ts')).map((f) => readFileSync(new URL(`../src/${f}`, import.meta.url), 'utf8')).join('\n');
+  it('every flag read as `=== true` is one the parser treats as a switch', () => {
+    const read = [...source.matchAll(/(?:flag\('([a-z-]+)'\)|flags\.([a-z]+)|flags\['([a-z-]+)'\]) === true/g)].map((m) => m[1] ?? m[2] ?? m[3]!);
+    expect(read.length).toBeGreaterThan(5);
+    expect([...new Set(read)].filter((f) => !BOOLEAN_FLAGS.has(f))).toEqual([]);
+  });
+  it('no switch is read as if it had a value', () => {
+    const read = [...source.matchAll(/str\((?:p\.flags|h), '([a-z-]+)'\)/g)].map((m) => m[1]!);
+    expect(read.length).toBeGreaterThan(5);
+    expect([...new Set(read)].filter((f) => BOOLEAN_FLAGS.has(f))).toEqual([]);
+  });
+  it('a flag the help shows bare is a switch, and one shown with a value is not', () => {
+    const usage = source.slice(source.indexOf('USAGE'), source.indexOf('Every command takes'));
+    const bare = [...usage.matchAll(/\[--([a-z-]+)\]/g)].map((m) => m[1]!).filter((f) => !BOOLEAN_FLAGS.has(f));
+    const valued = [...usage.matchAll(/--([a-z-]+) <[^>]+>/g)].map((m) => m[1]!).filter((f) => BOOLEAN_FLAGS.has(f));
+    expect([...new Set(bare)]).toEqual([]);
+    expect([...new Set(valued)]).toEqual([]);
   });
 });

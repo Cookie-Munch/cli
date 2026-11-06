@@ -485,14 +485,43 @@ export async function bundleCommand(sub: 'plan' | 'apply', io: CliIo, client: Co
         const secretsOut = str(h, 'secrets-out');
         for (const w of missing) if (w.secretEnv && !io.env[w.secretEnv]) throw h.usage(`${w.url}: secretEnv ${w.secretEnv} is not set`);
         if (missing.some((w) => !w.secretEnv) && !secretsOut) throw h.usage('creating webhooks shows their signing secrets once: pass --secrets-out <file> (written 0600), or give each a secretEnv');
-        const secrets: Record<string, string> = {};
-        for (const w of missing) {
-          const chosen = w.secretEnv ? io.env[w.secretEnv] : undefined;
-          const s = await client.webhooks.create({ url: w.url, events: w.events, ...(w.cbid !== undefined ? { cbid: w.cbid } : {}), ...(chosen ? { secret: chosen } : {}) } as never);
-          if (s.secret) secrets[w.url] = s.secret;
+        // A signing secret is shown once: know it can be saved before asking for one.
+        if (secretsOut && missing.some((w) => !w.secretEnv)) {
+          try { await io.checkWritable?.(secretsOut); } catch (e) { throw h.usage(`cannot write --secrets-out ${secretsOut}: ${(e as Error).message}. No webhook was created.`); }
         }
-        for (const w of changed) { const x = have.find((y) => y.url === w.url)!; await client.webhooks.update(x.id, { events: w.events } as never); }
-        if (secretsOut && Object.keys(secrets).length) await io.writeFile(secretsOut, `${JSON.stringify(secrets, null, 2)}\n`, 0o600);
+        // A retry after a partial run adds to the file: the secrets already in it are not shown again.
+        const before = secretsOut ? await io.readFile(secretsOut).catch(() => null) : null;
+        let secrets: Record<string, string> = {};
+        if (before !== null) {
+          let parsed: unknown;
+          try { parsed = JSON.parse(before); } catch { /* refused below */ }
+          // Only a file of url -> secret is ours to add to: never merge a secret into someone's bundle.
+          const ours = parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) && Object.entries(parsed).every(([k, v]) => /^https?:\/\//.test(k) && typeof v === 'string');
+          if (!ours) throw h.usage(`--secrets-out ${secretsOut} exists and is not a secrets file. No webhook was created. Pass another path.`);
+          secrets = parsed as Record<string, string>;
+        }
+        const madeNow: string[] = [];
+        const save = async () => {
+          if (!secretsOut || madeNow.length === 0) return;
+          try {
+            await io.writeFile(secretsOut, `${JSON.stringify(secrets, null, 2)}\n`, 0o600);
+          } catch (e) {
+            throw new Error(`could not write --secrets-out ${secretsOut}: ${(e as Error).message}. Delete these webhooks and apply again, since their secrets are not shown twice: ${madeNow.join(', ')}`);
+          }
+        };
+        try {
+          for (const w of missing) {
+            const chosen = w.secretEnv ? io.env[w.secretEnv] : undefined;
+            const s = await client.webhooks.create({ url: w.url, events: w.events, ...(w.cbid !== undefined ? { cbid: w.cbid } : {}), ...(chosen ? { secret: chosen } : {}) } as never);
+            if (s.secret) { secrets[w.url] = s.secret; madeNow.push(w.url); }
+          }
+          for (const w of changed) { const x = have.find((y) => y.url === w.url)!; await client.webhooks.update(x.id, { events: w.events } as never); }
+        } catch (e) {
+          // A later call failed: the webhooks made before it still need their secrets saved.
+          await save().catch((saveError: Error) => io.stderr(`${saveError.message}\n`));
+          throw e;
+        }
+        await save();
         return `${missing.length} created, ${changed.length} updated`;
       },
     });
@@ -668,8 +697,9 @@ export async function initCommand(io: CliIo, client: CookieMunchClient, h: OpsHe
   }
   const dry = h.flag('dry-run') === true;
   // A re-run, or a CI retry, finds the site it made: a second one would split consent across two cbids.
-  const bare = (d: string) => d.toLowerCase().replace(/^www\./, '');
-  const existing = given ? undefined : (await client.sites.list()).find((s) => bare(s.domain) === bare(domain!));
+  const bare = (d: string) => d.toLowerCase().replace(/\.$/, '').replace(/^www\./, '');
+  // Only a web site is this web domain's site; another platform may hold the same name. An alias is the site too.
+  const existing = given ? undefined : (await client.sites.list()).find((s) => ((s as { platform?: string }).platform ?? 'web') === 'web' && [s.domain, ...((s as { aliases?: string[] }).aliases ?? [])].some((d) => bare(d) === bare(domain!)));
   const onDisk = await io.readFile(out).catch(() => null);
   let fileCbid: unknown;
   try { fileCbid = onDisk === null ? undefined : (JSON.parse(onDisk) as { site?: { cbid?: unknown } }).site?.cbid; } catch { /* not ours to read: left as it is */ }
@@ -682,12 +712,28 @@ export async function initCommand(io: CliIo, client: CookieMunchClient, h: OpsHe
     io.stderr(`${out} is for site ${fileCbid}, not ${given ?? existing?.cbid ?? domain}. Nothing was created or changed. Pass another --out, or move that file.\n`);
     return 1;
   }
+  if (onDisk === null) {
+    try {
+      await io.checkWritable?.(out);
+    } catch (e) {
+      io.stderr(`Cannot write ${out}: ${(e as Error).message}. Nothing was created or changed. Pass another --out.\n`);
+      return 1;
+    }
+  }
   if (existing) io.stderr(`${domain} is already site ${existing.cbid}: using it.\n`);
   const cbid = given ?? existing?.cbid ?? (dry ? '<new site>' : (await client.sites.create({ domain: domain! } as never)).cbid);
   const file = `${JSON.stringify({ site: { cbid }, presets: [], cookies: [], executors: [] }, null, 2)}\n`;
   if (onDisk !== null) io.stderr(`${out} already exists: left as it is.\n`);
   else if (dry) io.stderr(`Would write ${out}.\n`);
-  else { await io.writeFile(out, file); io.stderr(`Wrote ${out}.\n`); }
+  else {
+    try {
+      await io.writeFile(out, file);
+    } catch (e) {
+      io.stderr(`Site ${cbid} exists, but ${out} could not be written: ${(e as Error).message}. Run this again with another --out: it finds the site.\n`);
+      return 1;
+    }
+    io.stderr(`Wrote ${out}.\n`);
+  }
   io.stdout(framework === 'next'
     ? `Add to the root layout, before other scripts (npm i @cookiemunch/next):
   CookieMunchScript and CookieSettingsLink, both from @cookiemunch/next
