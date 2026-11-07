@@ -2,6 +2,10 @@
 
 Every published release, newest first. Dates are the day the version was cut.
 
+## 0.18.2 (2026-11-07)
+
+- Added: `doctor` fails when a host is on more than one site of the organisation, naming the host and both sites, with or without `--site`.
+
 ## 0.18.1 (2026-11-05)
 
 - Fixed: `site update --keep-old-domain` works, and a switch given a value is read as written or refused, so `--dry-run=true` no longer does the write. `init` checks `--out` before creating a site, uses the web site for a domain and finds a site by its alias. `apply` checks `--secrets-out` before creating webhooks and saves the secrets it has if a later create fails. A file that can't be read says so. `partners list`, `link` and `unlink` each take only their own flags.

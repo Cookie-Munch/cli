@@ -215,6 +215,23 @@ export async function doctorCommand(io: CliIo, client: CookieMunchClient, h: Ops
   } catch (e) {
     checks.push({ check: 'key', ok: false, detail: (e as Error).message });
   }
+  // Every site, not just --site: a host on two sites splits its consent records, and nothing else says so.
+  try {
+    const held = new Map<string, string>();
+    const clashes = new Set<string>();
+    for (const s of (await client.sites.list()) as Array<{ cbid: string; domain: string; platform?: string; aliases?: string[] }>) {
+      const kind = s.platform ?? 'web';
+      const norm = (d: string) => (kind === 'web' || kind === 'amp' ? d.toLowerCase().replace(/^https?:\/\//, '').replace(/[/?#].*$/, '').replace(/\.$/, '').replace(/^www\./, '') : d.toLowerCase());
+      for (const host of new Set([s.domain, ...(s.aliases ?? [])].map(norm))) {
+        const first = held.get(`${kind} ${host}`);
+        if (first && first !== s.cbid) clashes.add(`${host} (${first}, ${s.cbid})`);
+        else held.set(`${kind} ${host}`, s.cbid);
+      }
+    }
+    checks.push(clashes.size
+      ? { check: 'sites', ok: false, detail: `a host is on more than one site: ${[...clashes].join('; ')}. Take it off one: cookiemunch site update --site <cbid> --aliases <the rest>` }
+      : { check: 'sites', ok: true, detail: 'no host is on two sites' });
+  } catch { /* a key that cannot list sites: the other checks still run */ }
   const wantOrg = str(h, 'org') ?? io.env.COOKIEMUNCH_ORG;
   if (wantOrg && me?.orgId) checks.push({ check: 'org', ok: me.orgId === wantOrg, detail: me.orgId === wantOrg ? `this key belongs to ${wantOrg}` : `this key's org is ${me.orgId}, not ${wantOrg}, the org your config names` });
   try {
