@@ -2,6 +2,12 @@
 
 Every published release, newest first. Dates are the day the version was cut.
 
+## 0.19.0 (2026-11-11)
+
+- Added: the plan file carries `rightsIdentity`, `rightsCaptcha`, `dsar` and `mailProvider` (secrets only by `secretEnv`); `plan` names the vendor or system on every line.
+- Added: `scan --cookies-file` for a signed-in crawl; `executors connect --param name=value` and `upgrade-preset --param`.
+- Added: executor suggestions and the Lucida, Hermetica and Watchtower presets.
+
 ## 0.18.2 (2026-11-07)
 
 - Added: `doctor` fails when a host is on more than one site of the organisation, naming the host and both sites, with or without `--site`.

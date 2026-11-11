@@ -19,7 +19,7 @@
  *   cookiemunch executors recheck <id>
  *   cookiemunch executors health <id> [--limit <n>]
  *   cookiemunch rights-page pull|diff|push|publish --site <cbid> [<file>] [--base <updatedAt>] [--yes]
- *   cookiemunch scan         --site <cbid> [--wait] [--timeout <seconds>]
+ *   cookiemunch scan         --site <cbid> [--wait] [--timeout <seconds>] [--cookies-file <path>]
  *   cookiemunch cookies presets|preset|unpreset|delete-observed|purge-observed|translation|translate --site <cbid> …
  *   cookiemunch site update  --site <cbid> [--domain <host> [--keep-old-domain]] [--name <name>] [--aliases a,b] [--dry-run]
  *   cookiemunch site brand   --site <cbid> [--url <https URL> | <brand.json>] [--dry-run]
@@ -127,7 +127,7 @@ Usage:
       verifying for 24 hours.
   cookiemunch executors upgrade-preset <id> [--preset <name>] [--version <n>]
                       [--org-id <id>] [--atlas-id-app-id <id>] [--revoke-atlas-id-grant]
-                      [--accept-preset <path> …] [--dry-run]
+                      [--accept-preset <path> …] [--param <name>=<value> …] [--dry-run]
       Rebuild a connection from its preset's latest version (or --version), keeping
       its id and credentials; --preset adopts one on a hand-written connection.
       Your hand edits are kept (the diff marks them kept or conflict); --accept-preset
@@ -151,15 +151,17 @@ Usage:
       cannot go live. Refused (exit 1) if the draft changed after it was read (or
       since --base); --yes never overrides that.
 
-  cookiemunch scan --site <cbid> [--wait] [--timeout <seconds>]
+  cookiemunch scan --site <cbid> [--wait] [--timeout <seconds>] [--cookies-file <path>]
       Start a cookie crawl of the site and print its state (JSON). --wait holds on
       until it is done or failed (default up to 120 s, --timeout to change) and exits
       1 when it failed or is still running at the end. A scan already running is
-      waited on rather than started twice.
+      waited on rather than started twice. Once done it lists undeclared and stale
+      cookies. --cookies-file: a file holding a test account's Cookie header value
+      ("sid=abc; csrf=def") for a signed-in crawl; never printed or stored.
 
   cookiemunch cookies presets --site <cbid>
       The declaration presets (atlas, forumulate, chatly, cookiemunch, referalli, firstpromoter,
-      partnerstack, tapfiliate, impact, seolyticize; referally is the deprecated old name of referalli): what each takes,
+      partnerstack, tapfiliate, impact, seolyticize, lucida, hermetica, watchtower; referally is the deprecated old name of referalli): what each takes,
       what it declared on this site, and whether the vendor's own manifest exists yet.
   cookiemunch cookies preset <vendor> --site <cbid> [--param k=v …] [--dry-run]
       Declare what that platform writes (cookies and browser storage), marked as
@@ -168,7 +170,8 @@ Usage:
       --param publicId=ch_web_… [--param storage=deny] [--param tracking=false].
       Referral and affiliate presets (referalli, firstpromoter, partnerstack, tapfiliate, impact):
       [--param cookieDomain=.example.com] [--param cookieDays=60] [--param category=…];
-      referalli [--param legacyName=false], impact [--param campaignId=…]. A row filed under a
+      referalli [--param legacyName=false], impact [--param campaignId=…]. Lucida: [--param publicKey=…]
+      [--param cookieDomain=…]; Hermetica: [--param storage=cookie]; each [--param category=…]. A row filed under a
       disabled category prints a warning and a suggestedConfigPatch. Any other vendor is
       declared with the API (PUT /v1/sites/{cbid}/cookies).
   cookiemunch cookies unpreset <vendor> --site <cbid> [--dry-run]
@@ -270,21 +273,27 @@ Usage:
   cookiemunch init [--framework next] (--site <cbid> | --domain <d>) [--out cookiemunch.json] [--dry-run]
       Make or pick the site, write cookiemunch.json, and print the tag, CSP and footer link to add.
   cookiemunch executors connect <chatly|forumulate|referalli|preset> --site <cbid> [--external-id <id>]
-      [--org-id <id>] [--key-env <VAR>] [--base-url <https url>] [--system <name>] [--defer | --no-verify] [--dry-run]
+      [--org-id <id>] [--key-env <VAR>] [--base-url <https url>] [--system <name>] [--param <name>=<value> …]
+      [--defer | --no-verify] [--dry-run]
       One route: the partner mints the key; with --key-env, your key from that variable. Ends in a
       connection, or the one human step and the command to run after it.
       The key is checked first (a read-only canary lookup): a refused key stores nothing and exits 1.
       --defer registers a system whose API is not live yet; --no-verify stores it unchecked.
       --base-url is for a preset that takes an address; --system names a second connection of a preset.
+      --param sets one of the preset's params (repeatable): --param programId=prg_1 keeps a referalli
+      connection to one program of a shared organisation.
   cookiemunch executors activate <id>
       A connection registered before its API was live (state "pending"): runs conformance, then activates.
   cookiemunch plan [cookiemunch.json] [--site <cbid>] [--detail] [--exit-code] [--json]
   cookiemunch apply [cookiemunch.json] [--site <cbid>] [--presets-only] [--secret-env NAME] [--secrets-out <file>]
-      One file for a site: {site, config, cookies, presets, executors, webhooks, rightsPage,
-      partners}, no secrets. plan prints the server's dry run of every part ("No changes" when
-      it matches); apply applies them in dependency order and logs each. New webhook secrets
-      go to --secrets-out (mode 0600), unless a webhook's secretEnv names a variable holding
-      one you chose.
+      One file for a site: {site, config, cookies, presets, rightsPage, rightsIdentity,
+      rightsCaptcha, dsar, mailProvider, executors, webhooks, partners}, no secrets. plan prints
+      the server's dry run (or a read-back diff) of every part ("No changes" when it matches),
+      naming each preset, and the executors, webhooks and partners when there are several;
+      apply applies them in dependency order and logs each. A part not in the file is left alone. rightsCaptcha and mailProvider take
+      their secret from the variable their secretEnv names; an unset one stops the run before
+      anything is sent. New webhook secrets go to --secrets-out (mode 0600), unless a webhook's
+      secretEnv names a variable holding one you chose.
   cookiemunch scan-source [dir] [--json]
       The first-party cookie and storage names your code sets (document.cookie, cookies.set,
       cookies().set, localStorage/sessionStorage.setItem in .js/.ts/.jsx/.tsx/.vue/.svelte/.html;
@@ -452,7 +461,7 @@ function proposed(current: Record<string, unknown>, file: Record<string, unknown
 }
 
 /** This package's version, sent in the default User-Agent (a test pins it to package.json). */
-export const CLI_VERSION = '0.18.2';
+export const CLI_VERSION = '0.19.0';
 
 /** `COOKIEMUNCH_USER_AGENT`, else `cookiemunch-cli/<version>`. */
 function userAgent(io: CliIo): string {
@@ -717,6 +726,7 @@ async function executorsCommand(
       ...(atlasIdAppId ? { atlasIdAppId } : {}),
       ...(p.flags['revoke-atlas-id-grant'] === true ? { revokeAtlasIdGrant: true } : {}),
       ...(accept ? { acceptPreset: accept.split('\n') } : {}),
+      ...(str(p.flags, 'param') ? { params: presetParams(p) as Record<string, string | boolean> } : {}),
     };
     const r =
       p.flags['dry-run'] === true
@@ -824,9 +834,11 @@ async function scanCommand(p: Parsed, io: CliIo, client: CookieMunchClient): Pro
   const timeout = str(p.flags, 'timeout');
   const timeoutS = timeout === undefined ? 120 : Number(timeout);
   if (!Number.isFinite(timeoutS) || timeoutS < 1 || timeoutS > 3600) throw new UsageError('--timeout must be a number of seconds from 1 to 3600');
+  const cookiesFile = str(p.flags, 'cookies-file');
+  const cookies = cookiesFile === undefined ? undefined : (await readText(io, cookiesFile)).trim();
   let started: Awaited<ReturnType<CookieMunchClient['sites']['scan']>> | null = null;
   try {
-    started = await client.sites.scan(cbid);
+    started = await (cookies ? client.sites.scan(cbid, { cookies }) : client.sites.scan(cbid));
   } catch (e) {
     if (!(e instanceof CookieMunchApiError && e.status === 409)) throw e;
     io.stderr(`A scan of ${cbid} is already running${p.flags.wait === true ? '; waiting for it' : ''}.\n`);
@@ -852,10 +864,12 @@ async function scanCommand(p: Parsed, io: CliIo, client: CookieMunchClient): Pro
   const took = r.durationMs !== undefined ? ` in ${Math.round(r.durationMs / 1000)} s` : '';
   const landed = r.finalUrl ? ` (redirected to ${r.finalUrl})` : '';
   io.stderr(`Scan ${r.scanId ?? ''} done${took}: ${n} cookie${n === 1 ? '' : 's'} seen${pages}${kept}${landed}.\n`);
+  if (r.undeclared?.length) io.stderr(`Undeclared (seen, not declared): ${r.undeclared.map((c) => c.name).join(', ')}\n`);
+  if (r.stale?.length) io.stderr(`Stale (declared, not seen): ${r.stale.map((c) => c.name).join(', ')}\n`);
   return 0;
 }
 
-const PRESET_VENDORS = ['atlas', 'forumulate', 'chatly', 'cookiemunch', 'referalli', 'firstpromoter', 'partnerstack', 'tapfiliate', 'impact', 'seolyticize'] as const;
+const PRESET_VENDORS = ['atlas', 'forumulate', 'chatly', 'cookiemunch', 'referalli', 'firstpromoter', 'partnerstack', 'tapfiliate', 'impact', 'seolyticize', 'lucida', 'hermetica', 'watchtower'] as const;
 /** Old preset names still accepted (the server answers them with a Deprecation header). */
 const PRESET_ALIASES: Record<string, Vendor> = { referally: 'referalli' };
 type Vendor = (typeof PRESET_VENDORS)[number];

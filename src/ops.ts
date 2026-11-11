@@ -403,16 +403,32 @@ interface Bundle {
   webhooks?: Array<{ url: string; events: string[]; cbid?: string | null; secretEnv?: string }>;
   rightsPage?: Record<string, unknown>;
   partners?: Array<{ partner: string; resource: string; scopes: string[]; externalId?: string; label?: string }>;
+  /** The site's sign-in provider (PUT /v1/sites/{cbid}/rights-identity); nothing in it is secret. */
+  rightsIdentity?: Record<string, unknown>;
+  /** The site's rights-page captcha; its secret comes from the variable `secretEnv` names. */
+  rightsCaptcha?: Record<string, unknown> & { secretEnv?: string };
+  /** The site's dsar-settings: graceDays, processing, acceptForwardsFrom. */
+  dsar?: Record<string, unknown>;
+  /** The organisation's mail provider for rights mail; its credential comes from the variable `secretEnv` names. */
+  mailProvider?: Record<string, unknown> & { secretEnv?: string };
 }
 
-const PARTS = ['site', 'config', 'cookies', 'presets', 'rightsPage', 'executors', 'webhooks', 'partners'] as const;
+const PARTS = ['site', 'config', 'cookies', 'presets', 'rightsPage', 'rightsIdentity', 'rightsCaptcha', 'dsar', 'mailProvider', 'executors', 'webhooks', 'partners'] as const;
 type Part = (typeof PARTS)[number];
-interface PartPlan { part: Part; changes: number; detail: string[]; rows?: string[]; info?: string[]; presets?: Array<{ system: unknown; preset: string; presetVersion?: number; latestVersion?: number; pinned: boolean }>; notApplied?: string[]; apply?: () => Promise<string> }
+
+/** The fields the file names, as `diffJson` lines against what the server holds (a field it lacks reads as null). */
+const fieldLines = (cur: Record<string, unknown>, want: Record<string, unknown>) =>
+  diffJson(Object.fromEntries(Object.keys(want).map((k) => [k, cur[k] ?? null])), want).map((c) => formatChanges([c]));
+
+/** A list part names its items on its line when it has more than one. */
+const items = (names: string[]) => (names.length > 1 ? names.join(', ') : undefined);
+
+interface PartPlan { part: Part; item?: string | undefined; changes: number; detail: string[]; rows?: string[]; info?: string[]; presets?: Array<{ system: unknown; preset: string; presetVersion?: number; latestVersion?: number; pinned: boolean }>; notApplied?: string[]; apply?: () => Promise<string> }
 
 /**
  * One file for everything a site's privacy setup is (CMU-D12). `plan` asks the server's dry run of every part
  * and prints one combined diff; `apply` applies the parts in dependency order (site → config → cookies →
- * presets → rights page → executors → webhooks → partners), reads each back, and logs when.
+ * presets → rights page → sign-in provider → captcha → dsar settings → mail provider → executors → webhooks → partners), reads each back, and logs when.
  * No secret ever goes in the file: an executor's key comes from --secret-env, a new webhook's secret comes
  * from the variable its `secretEnv` names, or is written to --secrets-out (0600), or the webhook is not created.
  */
@@ -422,6 +438,13 @@ export async function bundleCommand(sub: 'plan' | 'apply', io: CliIo, client: Co
   for (const k of Object.keys(b)) if (!(PARTS as readonly string[]).includes(k) && k !== '$schema') throw h.usage(`${path}: unknown part ${k}; parts are ${PARTS.join(', ')}`);
   const cbid = b.site?.cbid ?? h.site();
   if (!cbid) throw h.usage(`${path} needs site.cbid (or --site)`);
+  // Secrets never sit in the file, and a variable that is not set fails here, before anything is sent.
+  for (const part of ['rightsCaptcha', 'mailProvider'] as const) {
+    const v = b[part];
+    if (!v) continue;
+    if ('secret' in v) throw h.usage(`${path}: ${part} carries no secret; name an environment variable with secretEnv`);
+    if (v.secretEnv !== undefined && (typeof v.secretEnv !== 'string' || !io.env[v.secretEnv])) throw h.usage(`${path}: ${part}.secretEnv ${String(v.secretEnv)} is not set. Nothing was sent.`);
+  }
   const plans: PartPlan[] = [];
 
   if (b.site) {
@@ -456,15 +479,51 @@ export async function bundleCommand(sub: 'plan' | 'apply', io: CliIo, client: Co
     ] : [];
     // A pinned preset never counts as a change: it is reported, and apply has nothing to do for it.
     if (p.pinned) {
-      plans.push({ part: 'presets', changes: 0, detail: [], rows, info: n ? [`preset ${p.vendor}: pinned, ${n} upstream change(s) not followed${moved}`] : [`preset ${p.vendor}: pinned`] });
+      plans.push({ part: 'presets', item: p.vendor, changes: 0, detail: [], rows, info: n ? [`preset ${p.vendor}: pinned, ${n} upstream change(s) not followed${moved}`] : [`preset ${p.vendor}: pinned`] });
       continue;
     }
-    plans.push({ part: 'presets', changes: n, detail: n ? [`preset ${p.vendor}: ${n} declaration change(s)${moved}`] : [], rows, apply: async () => { await client.sites.applyCookiePreset(cbid, p.vendor as never, (p.params ?? {}) as never); return `preset ${p.vendor} applied`; } });
+    plans.push({ part: 'presets', item: p.vendor, changes: n, detail: n ? [`preset ${p.vendor}: ${n} declaration change(s)${moved}`] : [], rows, apply: async () => { await client.sites.applyCookiePreset(cbid, p.vendor as never, (p.params ?? {}) as never); return `preset ${p.vendor} applied`; } });
   }
   if (b.rightsPage) {
     const r = await client.rightsPage.dryRun(cbid, b.rightsPage, { mode: 'put' });
     const diff = ((r as { diff?: Array<{ path: string }> }).diff ?? []);
     plans.push({ part: 'rightsPage', changes: diff.length, detail: diff.map((d) => d.path), apply: async () => { await client.rightsPage.put(cbid, b.rightsPage as never); return 'rights page draft saved (publish it with cookiemunch rights-page publish)'; } });
+  }
+  if (b.rightsIdentity) {
+    // The server's dry run fetches and checks the key set; the timestamps it would stamp are not a change.
+    const r = await client.rightsIdentity.set(cbid, b.rightsIdentity as never, { dryRun: true });
+    const diff = (r.diff ?? []).filter((d) => d.path !== 'verifiedAt' && d.path !== 'updatedAt');
+    plans.push({ part: 'rightsIdentity', changes: diff.length, detail: diff.map((d) => `${d.path}: ${JSON.stringify(d.from ?? null)} → ${JSON.stringify(d.to ?? null)}`), apply: async () => { const s = await client.rightsIdentity.set(cbid, b.rightsIdentity as never); return `sign-in provider ${s.type ?? ''} saved (${s.issuer ?? ''})`; } });
+  }
+  if (b.rightsCaptcha) {
+    const { secretEnv, ...want } = b.rightsCaptcha;
+    const secret = secretEnv ? io.env[secretEnv] : undefined;
+    const cur = await client.rightsCaptcha.get(cbid);
+    const detail = [
+      ...(cur.source !== 'site' ? [`source: ${cur.source} -> site`] : []),
+      ...fieldLines(cur as unknown as Record<string, unknown>, want),
+      ...(secret && cur.secretLast4 !== secret.slice(-4) ? [`secret: replaced from ${secretEnv}`] : []),
+    ];
+    plans.push({ part: 'rightsCaptcha', changes: detail.length, detail, apply: async () => { const s = await client.rightsCaptcha.set(cbid, { ...want, ...(secret ? { secret } : {}) } as never); return `captcha ${s.mode}${s.provider ? ` (${s.provider})` : ''} saved`; } });
+  }
+  if (b.dsar) {
+    const cur = await client.dsarSettings.get(cbid);
+    const detail = [...(cur.source !== 'site' ? [`source: ${cur.source} -> site`] : []), ...fieldLines(cur as unknown as Record<string, unknown>, b.dsar)];
+    plans.push({ part: 'dsar', changes: detail.length, detail, apply: async () => { const s = await client.dsarSettings.set(cbid, b.dsar as never); return `dsar settings saved (graceDays ${s.graceDays})`; } });
+  }
+  if (b.mailProvider) {
+    const { secretEnv, ...want } = b.mailProvider;
+    const secret = secretEnv ? io.env[secretEnv] : undefined;
+    const cur = await client.org.mailProvider.get();
+    const detail = [
+      ...(cur.configured ? [] : ['+ configured']),
+      ...fieldLines(cur as unknown as Record<string, unknown>, want),
+      ...(secret && cur.secretLast4 !== secret.slice(-4) ? [`secret: replaced from ${secretEnv}`] : []),
+    ];
+    plans.push({ part: 'mailProvider', changes: detail.length, detail, apply: async () => {
+      const s = await client.org.mailProvider.set({ ...want, ...(secret ? { secret } : {}) } as never);
+      return `mail provider ${s.provider ?? ''} saved${s.note ? `: ${s.note}` : ''}`;
+    } });
   }
   if (b.executors) {
     const live = await client.fulfillment.executors();
@@ -488,19 +547,21 @@ export async function bundleCommand(sub: 'plan' | 'apply', io: CliIo, client: Co
           : `preset ${e.preset}: v${e.presetVersion} -> v${e.presetLatestVersion} available (cookiemunch executors upgrade-preset ${e.id})`);
       }
     }
-    plans.push({ part: 'executors', changes: n, detail, rows, info, presets, apply: async () => { await executorsFileCommand('push', io, client, { ...h, positional: ['executors', 'push', path], readJson: async () => ({ executors: b.executors }) }); return 'executors pushed'; } });
+    plans.push({ part: 'executors', item: items(b.executors.map((w) => String(w.system))), changes: n, detail, rows, info, presets, apply: async () => { await executorsFileCommand('push', io, client, { ...h, positional: ['executors', 'push', path], readJson: async () => ({ executors: b.executors }) }); return 'executors pushed'; } });
   }
   if (b.webhooks) {
     for (const w of b.webhooks) if ('secret' in w) throw h.usage(`${path}: webhooks carry no secrets; name an environment variable with secretEnv`);
     const have = await client.webhooks.list();
     const missing = b.webhooks.filter((w) => !have.some((x) => x.url === w.url));
     const changed = b.webhooks.filter((w) => { const x = have.find((y) => y.url === w.url); return x && JSON.stringify([...x.events].sort()) !== JSON.stringify([...w.events].sort()); });
+    // Checked while planning, so apply fails before any part is written.
+    const unset = sub === 'apply' ? missing.find((w) => w.secretEnv && !io.env[w.secretEnv]) : undefined;
+    if (unset) throw h.usage(`${unset.url}: secretEnv ${unset.secretEnv} is not set. Nothing was sent.`);
     plans.push({
-      part: 'webhooks', changes: missing.length + changed.length,
+      part: 'webhooks', item: items(b.webhooks.map((w) => w.url)), changes: missing.length + changed.length,
       detail: [...missing.map((w) => `+ ${w.url}`), ...changed.map((w) => `~ ${w.url} events`)],
       apply: async () => {
         const secretsOut = str(h, 'secrets-out');
-        for (const w of missing) if (w.secretEnv && !io.env[w.secretEnv]) throw h.usage(`${w.url}: secretEnv ${w.secretEnv} is not set`);
         if (missing.some((w) => !w.secretEnv) && !secretsOut) throw h.usage('creating webhooks shows their signing secrets once: pass --secrets-out <file> (written 0600), or give each a secretEnv');
         // A signing secret is shown once: know it can be saved before asking for one.
         if (secretsOut && missing.some((w) => !w.secretEnv)) {
@@ -546,14 +607,15 @@ export async function bundleCommand(sub: 'plan' | 'apply', io: CliIo, client: Co
   if (b.partners) {
     const have = await client.partnerLinks.list();
     const missing = b.partners.filter((p) => !have.some((l) => l.partner === p.partner && l.resource === p.resource && l.status !== 'revoked'));
-    plans.push({ part: 'partners', changes: missing.length, detail: missing.map((p) => `+ ${p.partner} on ${p.resource} (${p.scopes.join(', ')})`), apply: async () => { for (const p of missing) await client.partnerLinks.create(p as never); return `${missing.length} link(s) created`; } });
+    plans.push({ part: 'partners', item: items(b.partners.map((p) => `${p.partner} on ${p.resource}`)), changes: missing.length, detail: missing.map((p) => `+ ${p.partner} on ${p.resource} (${p.scopes.join(', ')})`), apply: async () => { for (const p of missing) await client.partnerLinks.create(p as never); return `${missing.length} link(s) created`; } });
   }
 
   const total = plans.reduce((n, p) => n + p.changes, 0);
   if (sub === 'plan') {
     if (json(h)) print(io, { file: path, cbid, changes: total, parts: plans.map(({ apply: _a, ...p }) => p) });
     else for (const p of plans) {
-      io.stdout(`${p.part}: ${p.changes ? `${p.changes} change(s)` : 'No changes'}\n`);
+      // Every line names its part, and its item(s) when the part has them: six `presets: No changes` lines said nothing.
+      io.stdout(`${p.part}${p.item ? ` (${p.item})` : ''}: ${p.changes ? `${p.changes} change(s)` : 'No changes'}\n`);
       for (const d of p.detail) io.stdout(`  ${d}\n`);
       for (const d of p.info ?? []) io.stdout(`  ${d}\n`);
       if (h.flag('detail') === true) for (const d of p.rows ?? []) io.stdout(`    ${d}\n`);
@@ -574,7 +636,7 @@ export async function bundleCommand(sub: 'plan' | 'apply', io: CliIo, client: Co
     if (h.flag('presets-only') === true && p.part !== 'presets') continue;
     const result = await p.apply();
     log.push({ part: p.part, at: new Date().toISOString(), result });
-    if (!json(h)) io.stderr(`${log[log.length - 1]!.at} ${p.part}: ${result}\n`);
+    if (!json(h)) io.stderr(`${log[log.length - 1]!.at} ${p.part}${p.item ? ` (${p.item})` : ''}: ${result}\n`);
   }
   if (json(h)) print(io, { file: path, cbid, applied: log });
   else if (!log.length) io.stderr('No changes: nothing to apply.\n');
@@ -600,7 +662,15 @@ const warningText = (w: unknown) => {
 
 export async function executorConnectCommand(io: CliIo, client: CookieMunchClient, h: OpsHelpers): Promise<number> {
   const name = h.positional[2];
-  if (!name) throw h.usage('usage: cookiemunch executors connect <chatly|forumulate|referalli|preset> --site <cbid> [--key-env <VAR>] [--external-id <id>] [--org-id <id>] [--base-url <url>] [--system <name>] [--defer | --no-verify] [--dry-run]');
+  if (!name) throw h.usage('usage: cookiemunch executors connect <chatly|forumulate|referalli|preset> --site <cbid> [--key-env <VAR>] [--external-id <id>] [--org-id <id>] [--base-url <url>] [--system <name>] [--param <name>=<value> …] [--defer | --no-verify] [--dry-run]');
+  // --param name=value (repeatable): the preset's params, e.g. --param programId=prg_1 for referalli.
+  const params: Record<string, string | boolean> = {};
+  for (const line of str(h, 'param')?.split('\n') ?? []) {
+    const eq = line.indexOf('=');
+    if (eq <= 0) throw h.usage(`--param takes name=value, got "${line}"`);
+    const v = line.slice(eq + 1);
+    params[line.slice(0, eq)] = v === 'true' ? true : v === 'false' ? false : v;
+  }
   const defer = h.flag('defer') === true;
   const noVerify = h.flag('no-verify') === true;
   if (defer && noVerify) throw h.usage('--defer or --no-verify, not both');
@@ -619,10 +689,11 @@ export async function executorConnectCommand(io: CliIo, client: CookieMunchClien
     ...(orgId ? { orgId } : {}),
     ...(baseUrl ? { baseUrl } : {}),
     ...(system ? { system } : {}),
+    ...(Object.keys(params).length ? { params } : {}),
     ...(defer ? { state: 'pending' } : {}),
     ...(secretKey ? { secretKey } : { mintFrom: name, ...(externalId ? { externalId } : {}) }),
   };
-  const asFlags = (s = system) => `${orgId ? ` --org-id ${orgId}` : ''}${baseUrl ? ` --base-url ${baseUrl}` : ''}${s ? ` --system ${s}` : ''}`;
+  const asFlags = (s = system) => `${orgId ? ` --org-id ${orgId}` : ''}${baseUrl ? ` --base-url ${baseUrl}` : ''}${s ? ` --system ${s}` : ''}${Object.entries(params).map(([k, v]) => ` --param ${k}=${String(v)}`).join('')}`;
   const fallback = `cookiemunch executors connect ${name} --site ${cbid}${asFlags()} --key-env ${name.toUpperCase()}_KEY`;
   const scope = `Scoped to ${cbid}: only requests carrying cbid ${cbid} reach it. POST /v1/dsar defaults cbid only when the org has one site.`;
   // One connection per system name, so the next step for a second site is a new name, never the same command again.

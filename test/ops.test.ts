@@ -187,6 +187,96 @@ describe('plan|apply cookiemunch.json (CMU-D12)', () => {
   });
 });
 
+describe('plan|apply: rights settings and mail in the file (CM-14)', () => {
+  const identity = { type: 'clerk', issuer: 'https://clerk.acme.example', authorizedParties: ['https://acme.example'] };
+  const captchaKey = 'cap-secret-0000wxyz';
+  const mailKey = 'mail-secret-1234';
+  const file = JSON.stringify({
+    site: { cbid: 'acme' },
+    rightsIdentity: identity,
+    rightsCaptcha: { mode: 'own', provider: 'turnstile', siteKey: '0x4AAA', secretEnv: 'CAPTCHA_SECRET' },
+    dsar: { graceDays: 14 },
+    mailProvider: { provider: 'postmark', fromEmail: 'privacy@acme.example', secretEnv: 'MAIL_SECRET' },
+  });
+  const env = { CAPTCHA_SECRET: captchaKey, MAIL_SECRET: mailKey };
+  const respond = (inSync: boolean) => (c: Call) => {
+    if (c.url.includes('/v1/sites/acme/rights-identity')) {
+      if (c.url.includes('dryRun=1')) return { status: 200, body: { dryRun: true, setting: {}, diff: inSync ? [{ path: 'updatedAt', from: 1, to: 2 }] : [{ path: 'issuer', from: null, to: identity.issuer }] } };
+      return { status: 200, body: { source: 'site', configured: true, type: 'clerk', issuer: identity.issuer } };
+    }
+    if (c.url.endsWith('/v1/sites/acme/rights-captcha')) return { status: 200, body: c.method === 'GET' ? { source: inSync ? 'site' : 'org', mode: 'own', provider: 'turnstile', siteKey: inSync ? '0x4AAA' : '0xOLD', secretSet: true, secretLast4: inSync ? 'wxyz' : 'abcd' } : { mode: 'own', provider: 'turnstile' } };
+    if (c.url.endsWith('/v1/sites/acme/dsar-settings')) return { status: 200, body: c.method === 'GET' ? { cbid: 'acme', graceDays: inSync ? 14 : 7, source: inSync ? 'site' : 'default' } : { cbid: 'acme', graceDays: 14 } };
+    if (c.url.endsWith('/v1/org/mail-provider')) return { status: 200, body: c.method === 'GET' ? (inSync ? { configured: true, sender: 'own', provider: 'postmark', fromEmail: 'privacy@acme.example', secretLast4: '1234' } : { configured: false, sender: 'none' }) : { configured: true, provider: 'postmark', note: 'send a test first' } };
+    return undefined;
+  };
+
+  it('plan names each change, and says No changes when the API already matches', async () => {
+    const h = harness({ files: { 'c.json': file }, env, respond: respond(false) });
+    expect(await run(['plan', 'c.json', '--exit-code'], h.io)).toBe(1);
+    expect(h.out()).toContain('rightsIdentity: 1 change(s)');
+    expect(h.out()).toContain('source: org -> site');
+    expect(h.out()).toContain('~ siteKey: "0xOLD" -> "0x4AAA"');
+    expect(h.out()).toContain('secret: replaced from CAPTCHA_SECRET');
+    expect(h.out()).toContain('~ graceDays: 7 -> 14');
+    expect(h.out()).toContain('mailProvider: 4 change(s)');
+    expect(h.calls.filter((c) => c.method !== 'GET' && !c.url.includes('dryRun')).length).toBe(0);
+    expect(h.out()).not.toContain(captchaKey);
+    const same = harness({ files: { 'c.json': file }, env, respond: respond(true) });
+    expect(await run(['plan', 'c.json', '--exit-code'], same.io)).toBe(0);
+    for (const part of ['rightsIdentity', 'rightsCaptcha', 'dsar', 'mailProvider']) expect(same.out()).toContain(`${part}: No changes`);
+  });
+
+  it('apply sends each setting with the secret its secretEnv names, never one from the file', async () => {
+    const h = harness({ files: { 'c.json': file }, env, respond: respond(false) });
+    expect(await run(['apply', 'c.json'], h.io)).toBe(0);
+    const put = (u: string) => h.calls.find((c) => c.method === 'PUT' && c.url.endsWith(u))?.body;
+    expect(put('/v1/sites/acme/rights-identity')).toEqual(identity);
+    expect(put('/v1/sites/acme/rights-captcha')).toEqual({ mode: 'own', provider: 'turnstile', siteKey: '0x4AAA', secret: captchaKey });
+    expect(put('/v1/sites/acme/dsar-settings')).toEqual({ graceDays: 14 });
+    expect(put('/v1/org/mail-provider')).toEqual({ provider: 'postmark', fromEmail: 'privacy@acme.example', secret: mailKey });
+    expect(h.err()).toContain('send a test first');
+  });
+
+  it('an unset secretEnv, or a secret in the file, stops the run before anything is sent', async () => {
+    const h = harness({ files: { 'c.json': file }, env: { CAPTCHA_SECRET: captchaKey }, respond: respond(false) });
+    expect(await run(['apply', 'c.json'], h.io)).toBe(2);
+    expect(h.err()).toMatch(/mailProvider\.secretEnv MAIL_SECRET is not set/);
+    expect(h.calls).toHaveLength(0);
+    const inFile = JSON.stringify({ site: { cbid: 'acme' }, rightsCaptcha: { mode: 'own', secret: 'x' } });
+    const h2 = harness({ files: { 'c.json': inFile }, respond: respond(false) });
+    expect(await run(['plan', 'c.json'], h2.io)).toBe(2);
+    expect(h2.calls).toHaveLength(0);
+    // A webhook apply would create: checked before the parts ahead of it are written.
+    const hook = JSON.stringify({ site: { cbid: 'acme' }, dsar: { graceDays: 14 }, webhooks: [{ url: 'https://h.example/new', events: ['consent.*'], secretEnv: 'HOOK_SECRET' }] });
+    const h3 = harness({ files: { 'c.json': hook }, respond: (c) => (c.url.endsWith('/v1/webhooks') ? { status: 200, body: [] } : respond(false)(c)) });
+    expect(await run(['apply', 'c.json'], h3.io)).toBe(2);
+    expect(h3.calls.filter((c) => c.method !== 'GET')).toHaveLength(0);
+  });
+
+  it('a part not in the file is never read or written', async () => {
+    const h = harness({ files: { 'c.json': JSON.stringify({ site: { cbid: 'acme' }, dsar: { graceDays: 14 } }) }, respond: respond(false) });
+    expect(await run(['apply', 'c.json'], h.io)).toBe(0);
+    expect(h.calls.some((c) => /rights-identity|rights-captcha|mail-provider/.test(c.url))).toBe(false);
+  });
+
+  it('plan names the item on each preset, executor, webhook and partner line', async () => {
+    const b = JSON.stringify({ site: { cbid: 'acme' }, presets: [{ vendor: 'atlas' }, { vendor: 'stripe' }], executors: [{ system: 'crm' }, { system: 'billing' }], webhooks: [{ url: 'https://h.example/a', events: ['consent.recorded'] }, { url: 'https://h.example/b', events: ['consent.recorded'] }], partners: [{ partner: 'forumulate', resource: 'site:acme', scopes: ['dsar:read'] }, { partner: 'chatly', resource: 'site:acme', scopes: ['dsar:read'] }] });
+    const h = harness({ files: { 'c.json': b }, respond: (c) => {
+      if (c.url.includes('/cookies/presets/')) return { status: 200, body: { dryRun: true, diff: { added: [], removed: [], changed: [] } } };
+      if (c.url.endsWith('/v1/dsar/executors')) return { status: 200, body: [{ id: 'e1', system: 'crm' }, { id: 'e2', system: 'billing' }] };
+      if (c.url.endsWith('/v1/webhooks')) return { status: 200, body: [{ id: 'w1', url: 'https://h.example/a', events: ['consent.recorded'] }, { id: 'w2', url: 'https://h.example/b', events: ['consent.recorded'] }] };
+      if (c.url.endsWith('/v1/partner_links')) return { status: 200, body: [{ partner: 'forumulate', resource: 'site:acme', status: 'active' }, { partner: 'chatly', resource: 'site:acme', status: 'active' }] };
+      return undefined;
+    } });
+    expect(await run(['plan', 'c.json', '--exit-code'], h.io)).toBe(0);
+    expect(h.out()).toContain('presets (atlas): No changes');
+    expect(h.out()).toContain('presets (stripe): No changes');
+    expect(h.out()).toContain('executors (crm, billing): No changes');
+    expect(h.out()).toContain('webhooks (https://h.example/a, https://h.example/b): No changes');
+    expect(h.out()).toContain('partners (forumulate on site:acme, chatly on site:acme): No changes');
+  });
+});
+
 describe('executors connect (one route)', () => {
   it('mints through the partner and says the scope', async () => {
     const h = harness({ respond: (c) => (c.url.includes('/v1/dsar/executors') ? { status: 201, body: { id: 'e1', system: 'chatly' } } : undefined) as never });

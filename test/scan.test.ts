@@ -25,6 +25,19 @@ describe('cookiemunch scan', () => {
     expect(h.err()).toMatch(/done in 31 s: 1 cookie seen on 5 pages, 12 kept from earlier/);
   });
 
+  it('--cookies-file sends the file as cookies for a signed-in crawl and never prints it; lists the diff', async () => {
+    const done = { ...DONE, undeclared: [{ name: '_ga', category: 'statistics' }], stale: [{ name: 'old', lastSeenAt: null }] };
+    const h = harness({
+      files: { 'c.txt': 'sid=s3cr3tvalue\n' },
+      respond: (c) => (c.method === 'POST' ? { status: 202, body: QUEUED } : c.url.includes('/scan?wait=') ? { status: 200, body: done } : undefined),
+    });
+    expect(await run(['scan', '--site', 'acme', '--wait', '--cookies-file', 'c.txt'], h.io)).toBe(0);
+    expect(h.calls[0]!.body).toEqual({ cookies: 'sid=s3cr3tvalue' });
+    expect(h.out() + h.err()).not.toContain('s3cr3tvalue');
+    expect(h.err()).toMatch(/Undeclared \(seen, not declared\): _ga/);
+    expect(h.err()).toMatch(/Stale \(declared, not seen\): old/);
+  });
+
   it('--wait exits 1 with the reason when the scan failed', async () => {
     const failed = { status: 'idle', state: 'failed', scanId: 's1', error: 'timed out after 90 s', lastScannedAt: null };
     const h = harness({ respond: (c) => (c.method === 'POST' ? { status: 202, body: QUEUED } : c.url.includes('/scan?wait=') ? { status: 200, body: failed } : undefined) });
