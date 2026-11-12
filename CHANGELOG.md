@@ -2,6 +2,12 @@
 
 Every published release, newest first. Dates are the day the version was cut.
 
+## 0.21.0 (2026-11-12)
+
+- Added: `cookies list --site <cbid> [--source preset|own|observed] [--vendor <v>] [--json]`: what the published declaration lists, with each row's category and where it came from.
+- Changed: `plan` lists each declaration a preset adds, changes or removes, with its category (the first 25; `--detail` for all), and names the revision in force on a preset with nothing to do.
+- Changed: `plan` names your own cookie rows the file leaves out (they are kept), and rows of yours that a preset also declares. `"replaceCookies": true` in the file removes the rows it leaves out, so a preset can take them over.
+
 ## 0.20.1 (2026-11-12)
 
 - Fixed: a `partners` entry in the plan file no longer crashes `plan` on a first declaration. `resource` defaults to the file's site and `scopes` to `["consent:read"]`, as documented.

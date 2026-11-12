@@ -347,6 +347,27 @@ describe('plan: preset drift', () => {
     expect(h.out()).toMatch(/\+ atlas: __session/);
   });
 
+  it('lists rows with categories without --detail, states the revision in force, and marks own rows a preset also declares (FormFlow 2026-11-12)', async () => {
+    const file = JSON.stringify({ site: { cbid: 'c1' }, cookies: [{ name: 'own_a', category: 'necessary' }], presets: [{ vendor: 'atlas' }, { vendor: 'lucida' }] });
+    const h = harness({ files: { 'c.json': file }, respond: ((c: Call) => {
+      if (c.url.includes('/cookies/presets/atlas')) return { status: 200, body: { dryRun: true, diff: { added: [], removed: [], changed: [{ name: '__client', before: { category: 'necessary' }, after: { category: 'preferences' } }] }, upstream: { applied: '2026-11-07', latest: '2026-11-12' } } };
+      if (c.url.includes('/cookies/presets/lucida')) return { status: 200, body: { dryRun: true, diff: { added: [], removed: [], changed: [] }, upstream: { applied: '2026-11-12', latest: '2026-11-12' }, skipped: [{ name: 'lc_consent', reason: 'you declared it yourself; your declaration is kept' }] } };
+      if (c.url.includes('/cookies')) return { status: 200, body: { dryRun: true, declared: [], saved: 1, removed: 1, diff: { added: [], removed: [{ name: 'lc_consent' }], changed: [] } } };
+      return undefined;
+    }) as never });
+    expect(await run(['plan', 'c.json'], h.io)).toBe(0);
+    expect(h.out()).toMatch(/~ atlas: __client \(preferences\): /);
+    expect(h.out()).toMatch(/preset lucida: manifest 2026-11-12, applied, every declaration matches/);
+    expect(h.out()).toMatch(/lc_consent: your own row, and the lucida preset declares it too; yours is kept\. It is not in this file and set "replaceCookies": true/);
+    expect(h.out()).toMatch(/cookies: No changes/);
+    expect(h.out()).toMatch(/kept: lc_consent: your own declaration\(s\) the file leaves out stay/);
+    expect(h.calls.find((c) => c.method === 'PUT' && /\/cookies\?/.test(c.url))!.body).toMatchObject({ replace: true });
+
+    const r = harness({ files: { 'c.json': JSON.stringify({ site: { cbid: 'c1' }, cookies: [], replaceCookies: true }) }, respond: ((c: Call) => (c.url.includes('/cookies') ? { status: 200, body: { dryRun: true, declared: [], saved: 0, removed: 1, diff: { added: [], removed: [{ name: 'lc_consent' }], changed: [] } } } : undefined)) as never });
+    expect([await run(['plan', 'c.json'], r.io), r.err()]).toEqual([0, expect.any(String)]);
+    expect(r.out()).toMatch(/cookies: 1 change\(s\)\n  - lc_consent/);
+  });
+
   it('a pinned preset is reported, is not a change, and exits 0', async () => {
     const h = harness({ files: { 'c.json': bundle(true) }, respond: drifted as never });
     expect(await run(['plan', 'c.json', '--exit-code'], h.io)).toBe(0);

@@ -20,7 +20,7 @@
  *   cookiemunch executors health <id> [--limit <n>]
  *   cookiemunch rights-page pull|diff|push|publish --site <cbid> [<file>] [--base <updatedAt>] [--yes]
  *   cookiemunch scan         --site <cbid> [--wait] [--timeout <seconds>] [--cookies-file <path>]
- *   cookiemunch cookies presets|preset|unpreset|delete-observed|purge-observed|translation|translate --site <cbid> …
+ *   cookiemunch cookies list|presets|preset|unpreset|delete-observed|purge-observed|translation|translate --site <cbid> …
  *   cookiemunch site update  --site <cbid> [--domain <host> [--keep-old-domain]] [--name <name>] [--aliases a,b] [--dry-run]
  *   cookiemunch site brand   --site <cbid> [--url <https URL> | <brand.json>] [--dry-run]
  *   cookiemunch health       [--site <cbid>] [--json] [--fail-on error|warning|never]
@@ -161,6 +161,9 @@ Usage:
       cookies. --cookies-file: a file holding a test account's Cookie header value
       ("sid=abc; csrf=def") for a signed-in crawl; never printed or stored.
 
+  cookiemunch cookies list --site <cbid> [--source preset|own|observed] [--vendor <v>] [--json]
+      The rows the published declaration lists, each with its category and where it came
+      from: a preset (and which), your own declaration, or observation (scan or visitors).
   cookiemunch cookies presets --site <cbid>
       The declaration presets (atlas, forumulate, chatly, cookiemunch, referalli, firstpromoter,
       partnerstack, tapfiliate, impact, seolyticize, lucida, hermetica, watchtower; referally is the deprecated old name of referalli): what each takes,
@@ -465,7 +468,7 @@ function proposed(current: Record<string, unknown>, file: Record<string, unknown
 }
 
 /** This package's version, sent in the default User-Agent (a test pins it to package.json). */
-export const CLI_VERSION = '0.20.1';
+export const CLI_VERSION = '0.21.0';
 
 /** `COOKIEMUNCH_USER_AGENT`, else `cookiemunch-cli/<version>`. */
 function userAgent(io: CliIo): string {
@@ -904,6 +907,24 @@ async function cookiesCommand(sub: string | undefined, p: Parsed, io: CliIo, cli
   const print = (v: unknown) => io.stdout(`${JSON.stringify(v, null, 2)}\n`);
   if (sub === 'presets') {
     print(await client.sites.cookiePresets(requireSite(p, io)));
+    return 0;
+  }
+  // FormFlow 2026-11-12: what the published policy lists, and where each row came from.
+  if (sub === 'list') {
+    const cbid = requireSite(p, io);
+    const want = p.flags.source;
+    if (want !== undefined && want !== 'preset' && want !== 'own' && want !== 'observed') throw new UsageError('--source is preset, own or observed');
+    const vendor = typeof p.flags.vendor === 'string' ? p.flags.vendor.toLowerCase() : undefined;
+    const d = await client.sites.cookies(cbid);
+    const by = new Map((d.declared ?? []).map((r) => [r.name, r]));
+    const rows = d.cookies.map((c) => {
+      const own = by.get(c.name);
+      const source = !c.declared ? 'observed' : own?.vendor ? 'preset' : 'own';
+      return { name: c.name, category: c.category, source, ...(own?.vendor ? { vendor: own.vendor } : {}), ...(c.provider ? { provider: c.provider } : {}) };
+    }).filter((r) => (!want || r.source === want) && (!vendor || r.vendor?.toLowerCase() === vendor));
+    if (p.flags.json === true) { print({ cbid, cookies: rows }); return 0; }
+    for (const r of rows) io.stdout(`${r.name}\t${r.category}\t${r.source === 'preset' ? `preset ${r.vendor}` : r.source}\n`);
+    io.stderr(`${rows.length} row(s) in the published declaration${want ? ` from ${want === 'preset' ? 'presets' : want === 'own' ? 'your own declarations' : 'observation'}` : ''}${vendor ? ` (${vendor})` : ''}.\n`);
     return 0;
   }
   // A custom preset (import-manifest) is removed by its product id, which no list here knows.

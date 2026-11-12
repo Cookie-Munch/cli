@@ -396,6 +396,8 @@ interface Bundle {
   site?: { cbid?: string; domain?: string; name?: string; aliases?: string[] };
   config?: Record<string, unknown>;
   cookies?: Array<Record<string, unknown> & { name: string }>;
+  /** Also remove your own declarations `cookies` leaves out (preset rows always stay). Default false: they are kept, and plan says so. */
+  replaceCookies?: boolean;
   /** `pinned`: this site does not follow the preset; plan reports upstream changes and apply leaves them. */
   presets?: Array<{ vendor: string; params?: Record<string, unknown>; pinned?: boolean }>;
   executors?: Array<Record<string, Json>>;
@@ -436,7 +438,8 @@ interface PartPlan { part: Part; item?: string | undefined; changes: number; det
 export async function bundleCommand(sub: 'plan' | 'apply', io: CliIo, client: CookieMunchClient, h: OpsHelpers): Promise<number> {
   const path = h.positional[1] ?? 'cookiemunch.json';
   const b = (await h.readJson(path)) as unknown as Bundle;
-  for (const k of Object.keys(b)) if (!(PARTS as readonly string[]).includes(k) && k !== '$schema') throw h.usage(`${path}: unknown part ${k}; parts are ${PARTS.join(', ')}`);
+  for (const k of Object.keys(b)) if (!(PARTS as readonly string[]).includes(k) && k !== '$schema' && k !== 'replaceCookies') throw h.usage(`${path}: unknown part ${k}; parts are ${PARTS.join(', ')} (and the replaceCookies switch)`);
+  if (b.replaceCookies !== undefined && typeof b.replaceCookies !== 'boolean') throw h.usage(`${path}: replaceCookies is true or false`);
   const cbid = b.site?.cbid ?? h.site();
   if (!cbid) throw h.usage(`${path} needs site.cbid (or --site)`);
   // Secrets never sit in the file, and a variable that is not set fails here, before anything is sent.
@@ -462,9 +465,19 @@ export async function bundleCommand(sub: 'plan' | 'apply', io: CliIo, client: Co
     plans.push({ part: 'config', changes: diff.length, detail: diff.map((d) => `${d.path}: ${JSON.stringify(d.from)} → ${JSON.stringify(d.to)}`), ...(dropped.length ? { notApplied: dropped } : {}), apply: async () => { await client.sites.patchConfig(cbid, b.config as never); return 'config patched'; } });
   }
   if (b.cookies) {
-    const r = await client.sites.declareCookies(cbid, b.cookies as never, { dryRun: true });
+    const replace = b.replaceCookies === true;
+    // Always planned as a replace, so rows the file leaves out are named even when they are kept.
+    const r = await client.sites.declareCookies(cbid, b.cookies as never, { dryRun: true, replace: true });
     const d = r.diff ?? { added: [], removed: [], changed: [] };
-    plans.push({ part: 'cookies', changes: d.added.length + d.removed.length + d.changed.length, detail: [...d.added.map((c) => `+ ${c.name}`), ...d.removed.map((c) => `- ${c.name}`), ...d.changed.map((c) => `~ ${c.name}`)], apply: async () => { const s = await client.sites.declareCookies(cbid, b.cookies as never); return `${s.saved} declaration(s) saved`; } });
+    const removed = replace ? d.removed : [];
+    const info = !replace && d.removed.length
+      ? [`kept: ${d.removed.map((c) => c.name).join(', ')}: your own declaration(s) the file leaves out stay (set "replaceCookies": true to remove them; preset rows always stay)`]
+      : [];
+    plans.push({
+      part: 'cookies', changes: d.added.length + removed.length + d.changed.length,
+      detail: [...d.added.map((c) => `+ ${c.name}`), ...removed.map((c) => `- ${c.name}`), ...d.changed.map((c) => `~ ${c.name}`)], info,
+      apply: async () => { const s = await client.sites.declareCookies(cbid, b.cookies as never, replace ? { replace: true } : undefined); return `${s.saved} declaration(s) saved${s.removed ? `, ${s.removed} removed` : ''}`; },
+    });
   }
   for (const p of b.presets ?? []) {
     const r = await client.sites.applyCookiePreset(cbid, p.vendor as never, (p.params ?? {}) as never, { dryRun: true });
@@ -473,17 +486,24 @@ export async function bundleCommand(sub: 'plan' | 'apply', io: CliIo, client: Co
     const up = (r as { upstream?: { applied: string | null; latest: string } }).upstream;
     const moved = up && up.applied !== up.latest ? ` (manifest ${up.applied ?? 'not applied yet'} -> ${up.latest})` : '';
     const rowName = (x: unknown) => (typeof x === 'string' ? x : String((x as { name?: unknown }).name));
+    const cat = (x: unknown) => { const c = (x as { category?: unknown } | null)?.category; return typeof c === 'string' ? ` (${c})` : ''; };
     const rows = d ? [
-      ...d.added.map((c) => `+ ${p.vendor}: ${rowName(c)}`),
-      ...d.removed.map((c) => `- ${p.vendor}: ${rowName(c)}`),
-      ...d.changed.map((c) => `~ ${p.vendor}: ${c.name}: ${formatChanges(diffJson(c.before as Json, c.after as Json))}`),
+      ...d.added.map((c) => `+ ${p.vendor}: ${rowName(c)}${cat(c)}`),
+      ...d.removed.map((c) => `- ${p.vendor}: ${rowName(c)}${cat(c)}`),
+      ...d.changed.map((c) => `~ ${p.vendor}: ${c.name}${cat(c.after)}: ${formatChanges(diffJson(c.before as Json, c.after as Json))}`),
     ] : [];
+    // A hand-written row of the same name keeps the preset from declaring it (FormFlow 2026-11-12).
+    const fileOwn = new Set((b.cookies ?? []).map((c) => c.name));
+    const dupes = ((r as { skipped?: Array<{ name: string; reason: string }> }).skipped ?? []).filter((s) => s.reason.startsWith('you declared it yourself'));
+    const dupeInfo = dupes.map((s) => `${s.name}: your own row, and the ${p.vendor} preset declares it too; yours is kept${fileOwn.has(s.name) ? '. Drop it from cookies' : '. It is not in this file'} and set "replaceCookies": true, and the preset takes it over`);
+    // Each plan states the revision in force, so a revision taken up server-side (presets.autoSync, or an earlier apply) is still visible.
+    const at = up ? `manifest ${up.latest}${up.applied === up.latest ? ', applied' : ''}` : 'built-in rows';
     // A pinned preset never counts as a change: it is reported, and apply has nothing to do for it.
     if (p.pinned) {
-      plans.push({ part: 'presets', item: p.vendor, changes: 0, detail: [], rows, info: n ? [`preset ${p.vendor}: pinned, ${n} upstream change(s) not followed${moved}`] : [`preset ${p.vendor}: pinned`] });
+      plans.push({ part: 'presets', item: p.vendor, changes: 0, detail: [], rows, info: [n ? `preset ${p.vendor}: pinned, ${n} upstream change(s) not followed${moved}` : `preset ${p.vendor}: pinned (${at})`, ...dupeInfo] });
       continue;
     }
-    plans.push({ part: 'presets', item: p.vendor, changes: n, detail: n ? [`preset ${p.vendor}: ${n} declaration change(s)${moved}`] : [], rows, apply: async () => { await client.sites.applyCookiePreset(cbid, p.vendor as never, (p.params ?? {}) as never); return `preset ${p.vendor} applied`; } });
+    plans.push({ part: 'presets', item: p.vendor, changes: n, detail: n ? [`preset ${p.vendor}: ${n} declaration change(s)${moved}`] : [], rows, info: [...(n ? [] : [`preset ${p.vendor}: ${at}, every declaration matches`]), ...dupeInfo], apply: async () => { await client.sites.applyCookiePreset(cbid, p.vendor as never, (p.params ?? {}) as never); return `preset ${p.vendor} applied`; } });
   }
   if (b.rightsPage) {
     const r = await client.rightsPage.dryRun(cbid, b.rightsPage, { mode: 'put' });
@@ -662,7 +682,11 @@ export async function bundleCommand(sub: 'plan' | 'apply', io: CliIo, client: Co
       io.stdout(`${p.part}${p.item ? ` (${p.item})` : ''}: ${p.changes ? `${p.changes} change(s)` : 'No changes'}\n`);
       for (const d of p.detail) io.stdout(`  ${d}\n`);
       for (const d of p.info ?? []) io.stdout(`  ${d}\n`);
-      if (h.flag('detail') === true) for (const d of p.rows ?? []) io.stdout(`    ${d}\n`);
+      // Each declaration a preset adds, changes or removes; --detail lifts the cap.
+      const rows = p.rows ?? [];
+      const shown = h.flag('detail') === true ? rows : rows.slice(0, 25);
+      for (const d of shown) io.stdout(`    ${d}\n`);
+      if (shown.length < rows.length) io.stdout(`    … and ${rows.length - shown.length} more (--detail lists every one)\n`);
       for (const d of p.notApplied ?? []) io.stdout(`  not applied: ${d} (the server's dry run does not keep it)\n`);
     }
     const unapplied = plans.reduce((n, p) => n + (p.notApplied?.length ?? 0), 0);
