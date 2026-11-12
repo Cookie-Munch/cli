@@ -2,6 +2,12 @@
 
 Every published release, newest first. Dates are the day the version was cut.
 
+## 0.20.1 (2026-11-12)
+
+- Fixed: a `partners` entry in the plan file no longer crashes `plan` on a first declaration. `resource` defaults to the file's site and `scopes` to `["consent:read"]`, as documented.
+- Fixed: `plan` compares `externalId`, `label` and `events` on partner links. A site consent grant is planned with the server's dry run of `POST /v1/sites/{cbid}/partners`, and a link replaced by a different `externalId` shows as `+`/`-` (apply revokes the old one).
+- Fixed: the help says strict unknown fields are the default; `COOKIEMUNCH_STRICT_FIELDS=0` sends `Prefer: lenient-unknown-fields`.
+
 ## 0.20.0 (2026-11-11)
 
 - Added: `executors conformance --test-subject` also checks the subject's export holds no credential (`requests.access.no_secrets`).

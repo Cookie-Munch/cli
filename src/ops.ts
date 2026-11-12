@@ -402,7 +402,8 @@ interface Bundle {
   /** `secretEnv` names an environment variable holding a signing secret you chose; the file never holds one. */
   webhooks?: Array<{ url: string; events: string[]; cbid?: string | null; secretEnv?: string }>;
   rightsPage?: Record<string, unknown>;
-  partners?: Array<{ partner: string; resource: string; scopes: string[]; externalId?: string; label?: string }>;
+  /** `resource` defaults to `site:<this site>` and `scopes` to `["consent:read"]`; `events` applies to a site consent grant. */
+  partners?: Array<{ partner: string; resource?: string; scopes?: string[]; externalId?: string; label?: string; events?: string[] }>;
   /** The site's sign-in provider (PUT /v1/sites/{cbid}/rights-identity); nothing in it is secret. */
   rightsIdentity?: Record<string, unknown>;
   /** The site's rights-page captcha; its secret comes from the variable `secretEnv` names. */
@@ -605,9 +606,52 @@ export async function bundleCommand(sub: 'plan' | 'apply', io: CliIo, client: Co
     });
   }
   if (b.partners) {
-    const have = await client.partnerLinks.list();
-    const missing = b.partners.filter((p) => !have.some((l) => l.partner === p.partner && l.resource === p.resource && l.status !== 'revoked'));
-    plans.push({ part: 'partners', item: items(b.partners.map((p) => `${p.partner} on ${p.resource}`)), changes: missing.length, detail: missing.map((p) => `+ ${p.partner} on ${p.resource} (${p.scopes.join(', ')})`), apply: async () => { for (const p of missing) await client.partnerLinks.create(p as never); return `${missing.length} link(s) created`; } });
+    const siteRes = `site:${cbid}`;
+    const want = b.partners.map((p) => {
+      if (!p || typeof p.partner !== 'string') throw h.usage(`${path}: each partners entry needs partner`);
+      const resource = p.resource ?? siteRes;
+      if (!/^(site|org):.+$/.test(resource)) throw h.usage(`${path}: partners ${p.partner}: resource is site:<cbid> or org:<orgId>`);
+      const scopes = p.scopes ?? ['consent:read'];
+      // The same split provisioning makes: a site link with only consent:read is the site's partner grant (events, label, upsert).
+      const grant = resource === siteRes && scopes.length === 1 && scopes[0] === 'consent:read';
+      return { ...p, resource, scopes, grant, externalId: p.externalId ?? (grant ? undefined : resource.slice(resource.indexOf(':') + 1)) };
+    });
+    const standard = await client.partnerLinks.list();
+    const siteLinks = want.some((w) => w.grant) ? (await client.sites.listPartners(cbid)).links.filter((l) => l.status !== 'revoked') : [];
+    const detail: string[] = [];
+    const steps: Array<() => Promise<unknown>> = [];
+    for (const w of want) {
+      const name = `${w.partner} on ${w.resource}`;
+      if (w.grant) {
+        const mine = siteLinks.filter((l) => l.partner === w.partner);
+        // No externalId in the file: the one link this partner has here is the one meant.
+        const externalId = w.externalId ?? (mine.length === 1 ? mine[0]!.externalId : undefined);
+        if (!externalId) throw h.usage(`${path}: partners ${w.partner} needs externalId (the partner's id for you) for a new link`);
+        const input = { partner: w.partner, externalId, ...(w.label !== undefined ? { label: w.label } : {}), ...(w.events ? { events: w.events } : {}) };
+        const dry = await client.sites.linkPartner(cbid, input as never, { dryRun: true });
+        const stale = mine.filter((l) => l.externalId !== externalId);
+        if (dry.change === 'created') detail.push(`+ ${name} (externalId ${externalId}, consent:read)`);
+        if (dry.change === 'updated') {
+          const was = mine.find((l) => l.externalId === externalId);
+          const what = [w.label !== undefined && was?.label !== w.label ? `label ${was?.label ?? '(none)'} -> ${w.label}` : '', w.events && was && was.events.join(',') !== dry.link.events.join(',') ? `events ${was.events.join(', ')} -> ${dry.link.events.join(', ')}` : ''].filter(Boolean);
+          detail.push(`~ ${name}: ${what.join('; ') || 'updated'}`);
+        }
+        for (const l of stale) detail.push(`- ${name} externalId ${l.externalId} (${l.id}): the file names ${externalId}`);
+        if (dry.change !== 'unchanged') steps.push(() => client.sites.linkPartner(cbid, input as never));
+        for (const l of stale) steps.push(() => client.sites.unlinkPartner(cbid, l.id));
+        continue;
+      }
+      const live = standard.filter((l) => l.partner === w.partner && l.resource === w.resource && l.status !== 'revoked' && l.status !== 'expired');
+      const same = live.find((l) => l.externalId === w.externalId);
+      const sameScopes = (l: { scopes: string[] }) => [...l.scopes].sort().join(',') === [...w.scopes].sort().join(',');
+      if (same && sameScopes(same) && (w.label === undefined || same.label === w.label)) continue;
+      // A standard link is never edited in place: a different one is made and the old one revoked.
+      const replaced = same ?? (live.length === 1 && w.externalId === undefined ? live[0] : undefined);
+      detail.push(replaced ? `~ ${name}: replaces ${replaced.id} (${[!sameScopes(replaced) ? `scopes ${replaced.scopes.join(', ')} -> ${w.scopes.join(', ')}` : '', replaced.externalId !== w.externalId ? `externalId ${replaced.externalId} -> ${w.externalId}` : '', w.label !== undefined && replaced.label !== w.label ? `label ${replaced.label ?? '(none)'} -> ${w.label}` : ''].filter(Boolean).join('; ')})` : `+ ${name} (${w.scopes.join(', ')})`);
+      steps.push(() => client.partnerLinks.create({ partner: w.partner, resource: w.resource, scopes: w.scopes, ...(w.externalId ? { externalId: w.externalId } : {}), ...(w.label !== undefined ? { label: w.label } : {}) } as never));
+      if (replaced) steps.push(() => client.partnerLinks.revoke(replaced.id));
+    }
+    plans.push({ part: 'partners', item: items(want.map((w) => `${w.partner} on ${w.resource}`)), changes: detail.length, detail, apply: async () => { for (const s of steps) await s(); return `${detail.length} link change(s)`; } });
   }
 
   const total = plans.reduce((n, p) => n + p.changes, 0);

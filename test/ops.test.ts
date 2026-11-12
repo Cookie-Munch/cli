@@ -168,6 +168,41 @@ describe('plan|apply cookiemunch.json (CMU-D12)', () => {
     expect(h.err()).not.toContain('No changes: all');
   });
 
+  it('partners: documented defaults, a site grant planned by the server, externalId drift shown (CMR-1)', async () => {
+    const live = { id: 'pl_r', cbid: 'acme', partner: 'referalli', externalId: 'org_1', label: 'referrals', events: ['consent.recorded'], status: 'active' };
+    const r = (c: Call) => {
+      if (c.url.endsWith('/v1/sites/acme/partners') && c.method === 'GET') return { status: 200, body: { links: [live], partners: [] } };
+      if (c.url.includes('/v1/sites/acme/partners')) {
+        const body = c.body as { partner: string; externalId: string; label?: string };
+        const hit = body.partner === live.partner && body.externalId === live.externalId;
+        const change = !hit ? 'created' : body.label !== undefined && body.label !== live.label ? 'updated' : 'unchanged';
+        return { status: 200, body: { change, link: { ...live, ...body } } };
+      }
+      return respond(c);
+    };
+    const plan = async (partners: unknown[]) => {
+      const h = harness({ files: { 'p.json': JSON.stringify({ site: { cbid: 'acme' }, partners }) }, respond: r });
+      return { code: await run(['plan', 'p.json', '--exit-code'], h.io), h };
+    };
+    const same = await plan([{ partner: 'referalli', externalId: 'org_1', label: 'referrals' }]);
+    expect(same.code).toBe(0);
+    expect(same.h.out()).toContain('partners: No changes');
+    const wrong = await plan([{ partner: 'referalli', externalId: 'totally-wrong', label: 'referrals' }]);
+    expect(wrong.code).toBe(1);
+    expect(wrong.h.out()).toContain('+ referalli on site:acme (externalId totally-wrong, consent:read)');
+    expect(wrong.h.out()).toContain('- referalli on site:acme externalId org_1 (pl_r): the file names totally-wrong');
+    const relabel = await plan([{ partner: 'referalli', label: 'refs' }]);
+    expect(relabel.h.out()).toContain('~ referalli on site:acme: label referrals -> refs');
+    // First declaration, no resource and no scopes: no crash, and the partner's id is asked for.
+    expect((await plan([{ partner: 'hermetica' }])).code).toBe(2);
+    const first = await plan([{ partner: 'hermetica', externalId: 'acc_9' }]);
+    expect(first.h.out()).toContain('+ hermetica on site:acme (externalId acc_9, consent:read)');
+    const org = await plan([{ partner: 'hermetica', resource: 'org:o1', scopes: ['dsar:read'] }]);
+    expect(org.h.out()).toContain('+ hermetica on org:o1 (dsar:read)');
+    // Nothing was written by any plan.
+    for (const x of [same, wrong, relabel, first, org]) expect(x.h.calls.filter((c) => c.method !== 'GET' && !c.url.includes('dryRun')).length).toBe(0);
+  });
+
   it('refuses an unknown part, and refuses to create a webhook without --secrets-out', async () => {
     expect(await run(['plan', 'x.json'], harness({ files: { 'x.json': JSON.stringify({ site: { cbid: 'acme' }, nope: {} }) } }).io)).toBe(2);
     const b2 = JSON.stringify({ site: { cbid: 'acme' }, webhooks: [{ url: 'https://h.example/new', events: ['consent.recorded'] }] });
@@ -265,7 +300,7 @@ describe('plan|apply: rights settings and mail in the file (CM-14)', () => {
       if (c.url.includes('/cookies/presets/')) return { status: 200, body: { dryRun: true, diff: { added: [], removed: [], changed: [] } } };
       if (c.url.endsWith('/v1/dsar/executors')) return { status: 200, body: [{ id: 'e1', system: 'crm' }, { id: 'e2', system: 'billing' }] };
       if (c.url.endsWith('/v1/webhooks')) return { status: 200, body: [{ id: 'w1', url: 'https://h.example/a', events: ['consent.recorded'] }, { id: 'w2', url: 'https://h.example/b', events: ['consent.recorded'] }] };
-      if (c.url.endsWith('/v1/partner_links')) return { status: 200, body: [{ partner: 'forumulate', resource: 'site:acme', status: 'active' }, { partner: 'chatly', resource: 'site:acme', status: 'active' }] };
+      if (c.url.endsWith('/v1/partner_links')) return { status: 200, body: [{ id: 'pl1', partner: 'forumulate', resource: 'site:acme', scopes: ['dsar:read'], externalId: 'acme', status: 'active' }, { id: 'pl2', partner: 'chatly', resource: 'site:acme', scopes: ['dsar:read'], externalId: 'acme', status: 'active' }] };
       return undefined;
     } });
     expect(await run(['plan', 'c.json', '--exit-code'], h.io)).toBe(0);

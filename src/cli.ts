@@ -320,8 +320,10 @@ Environment:
   COOKIEMUNCH_API_KEY   an API key (cookiemunch_live_…, or a legacy fck_…). Required.
   COOKIEMUNCH_BASE_URL  the API origin. Default ${DEFAULT_BASE_URL}.
   COOKIEMUNCH_SITE      default for --site.
-  COOKIEMUNCH_STRICT_FIELDS=1  send Prefer: strict-unknown-fields on writes: a field the
-                        API does not know is refused (400 unknown_field), not ignored.
+  COOKIEMUNCH_STRICT_FIELDS  writes refuse a field the API does not know (400 unknown_field)
+                        by default (API version 2026-10-24 on; GET /v1/keys/self says
+                        strictUnknownFields). =0 sends Prefer: lenient-unknown-fields, so such
+                        fields are ignored; =1 makes a key pinned to an older version strict too.
   COOKIEMUNCH_SECRET_RECIPIENT=x25519:<base64>  answers carry once-shown secrets sealed to
                         this key (sealed_secret), never in plaintext.
   COOKIEMUNCH_ORG       the org id doctor checks the key against.
@@ -463,7 +465,7 @@ function proposed(current: Record<string, unknown>, file: Record<string, unknown
 }
 
 /** This package's version, sent in the default User-Agent (a test pins it to package.json). */
-export const CLI_VERSION = '0.20.0';
+export const CLI_VERSION = '0.20.1';
 
 /** `COOKIEMUNCH_USER_AGENT`, else `cookiemunch-cli/<version>`. */
 function userAgent(io: CliIo): string {
@@ -1112,7 +1114,10 @@ export async function run(argv: string[], io: CliIo): Promise<number> {
     apiKey: key, baseUrl: base, fetch: io.fetch, userAgent: userAgent(io),
     ...(io.env.COOKIEMUNCH_STRICT_FIELDS === '1' ? { strictUnknownFields: true } : {}),
     ...(io.env.COOKIEMUNCH_SECRET_RECIPIENT ? { secretRecipient: io.env.COOKIEMUNCH_SECRET_RECIPIENT } : {}),
-    ...(typeof p.flags['idempotency-key'] === 'string' ? { headers: { 'Idempotency-Key': p.flags['idempotency-key'] } } : {}),
+    headers: {
+      ...(typeof p.flags['idempotency-key'] === 'string' ? { 'Idempotency-Key': p.flags['idempotency-key'] } : {}),
+      ...(io.env.COOKIEMUNCH_STRICT_FIELDS === '0' ? { Prefer: 'lenient-unknown-fields' } : {}),
+    },
   });
   const ops: OpsHelpers = {
     requireSite: () => requireSite(p, io),
