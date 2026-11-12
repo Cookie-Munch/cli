@@ -21,6 +21,8 @@ export const KNOWN_MANIFEST_HOSTS: Readonly<Record<string, readonly string[]>> =
   chatly: ['chatlychat.com', 'api.chatlychat.com'],
   forumulate: ['forumulate.com'],
   referalli: ['referalli.com'],
+  hermetica: ['hermeticor.com'],
+  watchtower: ['watchtowerops.net'],
 };
 
 /** Old names still accepted. */
@@ -178,7 +180,7 @@ export async function cspCommand(
   io: CspIo,
   usage: (message: string) => Error,
 ): Promise<number> {
-  if (!opts.merge) throw usage('--merge is required: vendor names (cookiemunch, atlas, chatly, forumulate, referalli) or manifest URLs, comma-separated');
+  if (!opts.merge) throw usage('--merge is required: vendor names (cookiemunch, atlas, chatly, forumulate, referalli, hermetica, watchtower) or manifest URLs, comma-separated');
   if (opts.framework !== undefined && !(CSP_FRAMEWORKS as readonly string[]).includes(opts.framework)) {
     throw usage(`--framework must be one of ${CSP_FRAMEWORKS.join(', ')}`);
   }

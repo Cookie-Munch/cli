@@ -2,6 +2,12 @@
 
 Every published release, newest first. Dates are the day the version was cut.
 
+## 0.20.0 (2026-11-11)
+
+- Added: `executors conformance --test-subject` also checks the subject's export holds no credential (`requests.access.no_secrets`).
+- Added: `csp --merge` knows `hermetica` and `watchtower`.
+- Changed: tracks `@cookiemunch/sdk` 0.23.0.
+
 ## 0.19.0 (2026-11-11)
 
 - Added: the plan file carries `rightsIdentity`, `rightsCaptcha`, `dsar` and `mailProvider` (secrets only by `secretEnv`); `plan` names the vendor or system on every line.

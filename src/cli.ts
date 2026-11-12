@@ -117,6 +117,8 @@ Usage:
       environment variable NAME, never from the command line. Without
       --canary-email the organisation's canary address is fetched (needs
       COOKIEMUNCH_API_KEY); with it, no Cookie Munch key is needed at all.
+      --test-subject looks up and exports a person you seeded (never erased) and
+      checks the export holds no password, hash, secret, key or token.
       --erase-subject really erases that throwaway subject through your erase code, then
       checks a lookup no longer finds them: seed it again before each run.
       Exits 1 when any rule fails.
@@ -236,7 +238,7 @@ Usage:
   cookiemunch csp --merge <vendors|urls> [--framework next|express|nginx] [--site <cbid>]
       One Content-Security-Policy from several products' embed manifests
       (/.well-known/<product>-embed.json): cookiemunch, atlas, chatly, forumulate,
-      referalli, or any manifest URL. --framework prints it for next.config.js,
+      referalli, hermetica, watchtower, or any manifest URL. --framework prints it for next.config.js,
       Express or nginx; without it, the header value. --site uses your site's own
       Cookie Munch manifest (its logo, fonts, sync endpoint). Needs no API key. Exits 1
       when a named product has not published a manifest (the rest are still merged).
@@ -461,7 +463,7 @@ function proposed(current: Record<string, unknown>, file: Record<string, unknown
 }
 
 /** This package's version, sent in the default User-Agent (a test pins it to package.json). */
-export const CLI_VERSION = '0.19.0';
+export const CLI_VERSION = '0.20.0';
 
 /** `COOKIEMUNCH_USER_AGENT`, else `cookiemunch-cli/<version>`. */
 function userAgent(io: CliIo): string {

@@ -89,7 +89,7 @@ describe('cookiemunch csp', () => {
     const h = harness();
     expect(await run(['csp', '--merge', 'nobody'], h.io)).toBe(2);
     expect(manifestSources('referally', { apiBase: 'https://api.test' }).sources[0]!.product).toBe('referalli');
-    expect(Object.keys(KNOWN_MANIFEST_HOSTS)).toEqual(['cookiemunch', 'atlas', 'chatly', 'forumulate', 'referalli']);
+    expect(Object.keys(KNOWN_MANIFEST_HOSTS)).toEqual(['cookiemunch', 'atlas', 'chatly', 'forumulate', 'referalli', 'hermetica', 'watchtower']);
   });
 });
 
