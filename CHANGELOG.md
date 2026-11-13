@@ -2,6 +2,10 @@
 
 Every published release, newest first. Dates are the day the version was cut.
 
+## 0.24.0 (2026-11-13)
+
+- Changed: `cookies suggestions` prints a table (one line per platform detected, then one per suggestion: name, storage, category, preset or confidence, reason); `--json` prints the document as before.
+
 ## 0.23.0 (2026-11-13)
 
 - Fixed: `cookies list --source preset` shows the preset rows your own rows hide (`shadowed`) for a preset applied before 0.22, read from each applied preset's dry run, with the preset's own category.

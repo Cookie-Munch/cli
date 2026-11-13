@@ -113,3 +113,23 @@ describe('cookiemunch cookies: manifests and suggestions (CMU-X36, CMU-D15)', ()
     expect(h.calls[3]).toMatchObject({ method: 'DELETE', url: 'https://api.test/v1/sites/acme/cookies/presets/acmechat' });
   });
 });
+
+describe('cookiemunch cookies suggestions output (CMR-16)', () => {
+  const body = {
+    vendors: [{ vendor: 'watchtower', display: 'Watchtower', preset: 'watchtower', applied: false, needsParams: false, evidence: [{ kind: 'storage', value: 'wt-offline-logs' }] }],
+    suggestions: [{ name: 'wt-offline-logs', storage: 'indexedDB', foundOnPages: ['/'], suggestedPreset: 'watchtower', suggestedCategory: 'statistics', confidence: 'high', reason: 'Watchtower\'s preset declares it' }],
+  };
+  const respond = (c: { url: string }) => (c.url.endsWith('/cookies/suggestions') ? { status: 200, body } : undefined);
+  it('plain: one readable line per platform and suggestion, not JSON', async () => {
+    const h = harness({ respond });
+    expect(await run(['cookies', 'suggestions', '--site', 'acme'], h.io)).toBe(0);
+    expect(h.out()).toBe('platform Watchtower\tpreset watchtower\twt-offline-logs\nwt-offline-logs\tindexedDB\tstatistics\tpreset watchtower\tWatchtower\'s preset declares it\n');
+    expect(h.err()).toContain('1 suggestion; 1 platform detected.');
+  });
+  it('--json: the document on stdout, nothing on stderr', async () => {
+    const h = harness({ respond });
+    expect(await run(['cookies', 'suggestions', '--site', 'acme', '--json'], h.io)).toBe(0);
+    expect(JSON.parse(h.out())).toEqual(body);
+    expect(h.err()).toBe('');
+  });
+});

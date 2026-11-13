@@ -468,7 +468,7 @@ function proposed(current: Record<string, unknown>, file: Record<string, unknown
 }
 
 /** This package's version, sent in the default User-Agent (a test pins it to package.json). */
-export const CLI_VERSION = '0.23.0';
+export const CLI_VERSION = '0.24.0';
 
 /** `COOKIEMUNCH_USER_AGENT`, else `cookiemunch-cli/<version>`. */
 function userAgent(io: CliIo): string {
@@ -976,7 +976,10 @@ async function cookiesCommand(sub: string | undefined, p: Parsed, io: CliIo, cli
   }
   if (sub === 'suggestions') {
     const r = await client.sites.cookieSuggestions(requireSite(p, io));
-    print(r);
+    if (p.flags.json === true) { print(r); return 0; }
+    // CMR-16: a table to read; --json is the document.
+    for (const v of r.vendors) io.stdout(`platform ${v.display}\t${v.preset ? `preset ${v.preset}${v.applied ? ' (applied)' : v.needsParams ? ' (needs parameters)' : ''}` : 'no preset'}\t${v.evidence.map((e) => e.value).join(', ')}\n`);
+    for (const x of r.suggestions) io.stdout(`${x.name}\t${x.storage}\t${x.suggestedCategory}\t${x.suggestedPreset ? `preset ${x.suggestedPreset}` : x.confidence}\t${x.reason}\n`);
     note(`${r.suggestions.length} suggestion${r.suggestions.length === 1 ? '' : 's'}; ${r.vendors.length} platform${r.vendors.length === 1 ? '' : 's'} detected.\n`);
     return 0;
   }
