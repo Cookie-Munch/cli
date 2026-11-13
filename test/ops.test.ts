@@ -358,7 +358,7 @@ describe('plan: preset drift', () => {
     expect(await run(['plan', 'c.json'], h.io)).toBe(0);
     expect(h.out()).toMatch(/~ atlas: __client \(preferences\): /);
     expect(h.out()).toMatch(/preset lucida: manifest 2026-11-12, applied, every declaration matches/);
-    expect(h.out()).toMatch(/lc_consent: your own row, and the lucida preset declares it too; yours is kept\. It is not in this file and set "replaceCookies": true/);
+    expect(h.out()).toMatch(/lc_consent: your own row, and the lucida preset declares it too; yours is kept\. It is not in this file and list it in "handOver"/);
     expect(h.out()).toMatch(/cookies: No changes/);
     expect(h.out()).toMatch(/kept: lc_consent: your own declaration\(s\) the file leaves out stay/);
     expect(h.calls.find((c) => c.method === 'PUT' && /\/cookies\?/.test(c.url))!.body).toMatchObject({ replace: true });
@@ -366,6 +366,45 @@ describe('plan: preset drift', () => {
     const r = harness({ files: { 'c.json': JSON.stringify({ site: { cbid: 'c1' }, cookies: [], replaceCookies: true }) }, respond: ((c: Call) => (c.url.includes('/cookies') ? { status: 200, body: { dryRun: true, declared: [], saved: 0, removed: 1, diff: { added: [], removed: [{ name: 'lc_consent' }], changed: [] } } } : undefined)) as never });
     expect([await run(['plan', 'c.json'], r.io), r.err()]).toEqual([0, expect.any(String)]);
     expect(r.out()).toMatch(/cookies: 1 change\(s\)\n  - lc_consent/);
+  });
+
+  it('CMR-10: handOver removes only the named rows and re-applies the preset that declares them', async () => {
+    const respond = ((c: Call) => {
+      if (c.url.includes('/cookies/presets/lucida')) return { status: 200, body: { dryRun: true, diff: { added: [], removed: [], changed: [] }, skipped: [{ name: 'lc_consent', reason: 'you declared it yourself; your declaration is kept' }] } };
+      if (c.method === 'DELETE') return { status: 204 };
+      if (c.url.includes('/cookies')) return { status: 200, body: { dryRun: true, declared: [], saved: 1, removed: 0, diff: { added: [], removed: [{ name: 'lc_consent' }, { name: 'ff_session' }], changed: [] } } };
+      return undefined;
+    }) as never;
+    const file = JSON.stringify({ site: { cbid: 'c1' }, cookies: [{ name: 'own_a', category: 'necessary' }], handOver: ['lc_consent'], presets: [{ vendor: 'lucida' }] });
+    const h = harness({ files: { 'c.json': file }, respond });
+    expect(await run(['plan', 'c.json'], h.io)).toBe(0);
+    expect(h.out()).toMatch(/cookies: 1 change\(s\)\n  - lc_consent \(handed over to its preset\)/);
+    expect(h.out()).toMatch(/kept: ff_session: /);
+    expect(h.out()).toMatch(/lc_consent: handed over; the lucida preset declares it once your row is removed/);
+    const a = harness({ files: { 'c.json': file }, respond });
+    expect(await run(['apply', 'c.json'], a.io)).toBe(0);
+    const order = a.calls.filter((c) => c.method !== 'GET' && !/dryRun/.test(c.url)).map((c) => `${c.method} ${c.url.replace(/^https?:\/\/[^/]+/, '')}`);
+    expect(order.some((x) => /^DELETE .*\/cookies\/lc_consent/.test(x))).toBe(true);
+    expect(order.some((x) => /^DELETE .*ff_session/.test(x))).toBe(false);
+    expect(order.findIndex((x) => /^DELETE .*lc_consent/.test(x))).toBeLessThan(order.findIndex((x) => /^PUT .*\/cookies\/presets\/lucida/.test(x)));
+    // A name no preset here declares would leave the policy: refused before anything is sent.
+    const o = harness({ files: { 'c.json': JSON.stringify({ site: { cbid: 'c1' }, cookies: [], handOver: ['ff_session'], presets: [{ vendor: 'lucida' }] }) }, respond });
+    expect(await run(['plan', 'c.json'], o.io)).toBe(2);
+    expect(o.err()).toMatch(/handOver ff_session: no preset in this file declares it/);
+  });
+
+  it('CMR-11: a partner grant this key may not make is reported with its fix, and the plan goes on', async () => {
+    const file = JSON.stringify({ site: { cbid: 'c1' }, config: { lang: 'en' }, partners: [{ partner: 'hermetica', externalId: 'ws_1' }] });
+    const h = harness({ files: { 'c.json': file }, respond: ((c: Call) => {
+      if (/\/partners\?dryRun|\/partners$/.test(c.url) && c.method === 'POST') return { status: 403, body: { error: 'insufficient_scope', message: 'missing required scope: subscriptions:write, identity:read', fix: 'use a key that holds them' } };
+      if (/\/partner_links/.test(c.url)) return { status: 200, body: [] };
+      if (/\/partners/.test(c.url)) return { status: 200, body: { links: [] } };
+      if (/\/config/.test(c.url)) return { status: 200, body: { diff: [], config: { lang: 'en' } } };
+      return undefined;
+    }) as never });
+    expect(await run(['plan', 'c.json', '--exit-code'], h.io)).toBe(1);
+    expect(h.out()).toMatch(/blocked: hermetica on site:c1: missing required scope: subscriptions:write, identity:read: use a key that holds them/);
+    expect(h.out()).toMatch(/config: No changes/);
   });
 
   it('a pinned preset is reported, is not a change, and exits 0', async () => {

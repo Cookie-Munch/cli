@@ -12,6 +12,16 @@ describe('cookiemunch cookies', () => {
     expect(h.err()).toMatch(/Would remove 1 row\./);
   });
 
+  it('CMR-9: list --source preset shows the preset row your own row hides, marked shadowed', async () => {
+    const body = { cookies: [{ name: 'lc_consent', category: 'statistics', declared: true }, { name: 'lc_identity_ab', category: 'statistics', declared: true }], declared: [{ name: 'lc_consent', category: 'statistics', shadows: 'lucida' }, { name: 'lc_identity_ab', category: 'statistics', vendor: 'lucida' }] };
+    const h = harness({ respond: (c) => (c.url.includes('/v1/sites/dv-1/cookies') ? { status: 200, body } : undefined) });
+    expect(await run(['cookies', 'list', '--site', 'dv-1', '--source', 'preset', '--vendor', 'lucida', '--json'], h.io)).toBe(0);
+    expect(JSON.parse(h.out()).cookies).toEqual([
+      { name: 'lc_consent', category: 'statistics', source: 'preset', vendor: 'lucida', shadowed: true },
+      { name: 'lc_identity_ab', category: 'statistics', source: 'preset', vendor: 'lucida' },
+    ]);
+  });
+
   it('purge-observed needs --since', async () => {
     const h = harness({});
     expect(await run(['cookies', 'purge-observed', '--site', 'dv-1'], h.io)).toBe(2);

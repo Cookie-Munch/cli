@@ -468,7 +468,7 @@ function proposed(current: Record<string, unknown>, file: Record<string, unknown
 }
 
 /** This package's version, sent in the default User-Agent (a test pins it to package.json). */
-export const CLI_VERSION = '0.21.0';
+export const CLI_VERSION = '0.22.0';
 
 /** `COOKIEMUNCH_USER_AGENT`, else `cookiemunch-cli/<version>`. */
 function userAgent(io: CliIo): string {
@@ -917,13 +917,15 @@ async function cookiesCommand(sub: string | undefined, p: Parsed, io: CliIo, cli
     const vendor = typeof p.flags.vendor === 'string' ? p.flags.vendor.toLowerCase() : undefined;
     const d = await client.sites.cookies(cbid);
     const by = new Map((d.declared ?? []).map((r) => [r.name, r]));
-    const rows = d.cookies.map((c) => {
+    const rows: Array<{ name: string; category: string; source: string; vendor?: string; provider?: string; shadowed?: true }> = d.cookies.flatMap((c) => {
       const own = by.get(c.name);
       const source = !c.declared ? 'observed' : own?.vendor ? 'preset' : 'own';
-      return { name: c.name, category: c.category, source, ...(own?.vendor ? { vendor: own.vendor } : {}), ...(c.provider ? { provider: c.provider } : {}) };
+      const row = { name: c.name, category: c.category, source, ...(own?.vendor ? { vendor: own.vendor } : {}), ...(c.provider ? { provider: c.provider } : {}) };
+      // CMR-9: the preset row your own row hides, so you can see it before you drop yours.
+      return own && !own.vendor && own.shadows ? [row, { name: c.name, category: c.category, source: 'preset', vendor: own.shadows, shadowed: true as const }] : [row];
     }).filter((r) => (!want || r.source === want) && (!vendor || r.vendor?.toLowerCase() === vendor));
     if (p.flags.json === true) { print({ cbid, cookies: rows }); return 0; }
-    for (const r of rows) io.stdout(`${r.name}\t${r.category}\t${r.source === 'preset' ? `preset ${r.vendor}` : r.source}\n`);
+    for (const r of rows) io.stdout(`${r.name}\t${r.category}\t${r.source === 'preset' ? `preset ${r.vendor}${r.shadowed ? ' (shadowed by your own row)' : ''}` : r.source}\n`);
     io.stderr(`${rows.length} row(s) in the published declaration${want ? ` from ${want === 'preset' ? 'presets' : want === 'own' ? 'your own declarations' : 'observation'}` : ''}${vendor ? ` (${vendor})` : ''}.\n`);
     return 0;
   }

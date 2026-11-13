@@ -2,6 +2,13 @@
 
 Every published release, newest first. Dates are the day the version was cut.
 
+## 0.22.0 (2026-11-13)
+
+- Added: `"handOver": ["lc_consent", …]` in `cookiemunch.json`: each named own row is removed alone and the preset in the file that declares it takes it over; other own rows are untouched. `plan` refuses a name no preset in the file declares.
+- Added: `cookies list --source preset` also lists a preset row your own row hides, marked `shadowed` (`"shadowed": true` with `--json`).
+- Changed: a partner grant the key may not make no longer stops `plan`: it is listed as `blocked:` with the server's fix, the other parts are still planned, and `--exit-code` exits 1.
+- Changed: a preset on built-in rows names its revision (`built-in rows (builtin:<hash>)`), and an instance preset's revision is `instance:<hash>`, so two runs print the same revision until what it declares changes.
+
 ## 0.21.0 (2026-11-12)
 
 - Added: `cookies list --site <cbid> [--source preset|own|observed] [--vendor <v>] [--json]`: what the published declaration lists, with each row's category and where it came from.
