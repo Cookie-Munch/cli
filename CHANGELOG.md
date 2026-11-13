@@ -2,6 +2,11 @@
 
 Every published release, newest first. Dates are the day the version was cut.
 
+## 0.23.0 (2026-11-13)
+
+- Fixed: `cookies list --source preset` shows the preset rows your own rows hide (`shadowed`) for a preset applied before 0.22, read from each applied preset's dry run, with the preset's own category.
+- Fixed: with `--json`, the `cookies` commands write only the JSON document to stdout and nothing to stderr (the notes are in the document), so output still parses when a runner merges the two streams.
+
 ## 0.22.0 (2026-11-13)
 
 - Added: `"handOver": ["lc_consent", …]` in `cookiemunch.json`: each named own row is removed alone and the preset in the file that declares it takes it over; other own rows are untouched. `plan` refuses a name no preset in the file declares.

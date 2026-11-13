@@ -468,7 +468,7 @@ function proposed(current: Record<string, unknown>, file: Record<string, unknown
 }
 
 /** This package's version, sent in the default User-Agent (a test pins it to package.json). */
-export const CLI_VERSION = '0.22.0';
+export const CLI_VERSION = '0.23.0';
 
 /** `COOKIEMUNCH_USER_AGENT`, else `cookiemunch-cli/<version>`. */
 function userAgent(io: CliIo): string {
@@ -903,6 +903,9 @@ function presetParams(p: Parsed): Record<string, string | boolean | number> {
 
 /** `cookiemunch cookies …`: vendor presets and removing what real-visit beacons stored (CKM-S-02, S-29). */
 async function cookiesCommand(sub: string | undefined, p: Parsed, io: CliIo, client: CookieMunchClient): Promise<number> {
+  // CMR-15: with --json, stdout is the one JSON document and nothing is written to stderr; the notes are
+  // in the document already (skipped, note, manifest), and a runner that merges the streams still parses it.
+  const note = (t: string) => { if (p.flags.json !== true) io.stderr(t); };
   const dry = p.flags['dry-run'] === true ? { dryRun: true as const } : undefined;
   const print = (v: unknown) => io.stdout(`${JSON.stringify(v, null, 2)}\n`);
   if (sub === 'presets') {
@@ -917,16 +920,27 @@ async function cookiesCommand(sub: string | undefined, p: Parsed, io: CliIo, cli
     const vendor = typeof p.flags.vendor === 'string' ? p.flags.vendor.toLowerCase() : undefined;
     const d = await client.sites.cookies(cbid);
     const by = new Map((d.declared ?? []).map((r) => [r.name, r]));
+    // CMR-9: the rows each applied preset would publish but your own rows hide, from its dry run (a preset applied
+    // before the `shadows` mark existed has no mark yet). A preset whose dry run fails falls back to the mark.
+    const live = new Map<string, { name: string; category: string; vendor: string }>();
+    if (want === 'preset' || want === undefined) {
+      const applied = [...new Set((d.declared ?? []).flatMap((r) => [r.vendor, r.shadows]).filter((v): v is string => !!v))].filter((v) => !vendor || v.toLowerCase() === vendor);
+      for (const v of applied) {
+        const dry = await client.sites.applyCookiePreset(cbid, v as never, {} as never, { dryRun: true }).catch(() => null);
+        for (const r of dry?.shadowed ?? []) live.set(r.name, { name: r.name, category: r.category, vendor: v });
+      }
+    }
     const rows: Array<{ name: string; category: string; source: string; vendor?: string; provider?: string; shadowed?: true }> = d.cookies.flatMap((c) => {
       const own = by.get(c.name);
       const source = !c.declared ? 'observed' : own?.vendor ? 'preset' : 'own';
       const row = { name: c.name, category: c.category, source, ...(own?.vendor ? { vendor: own.vendor } : {}), ...(c.provider ? { provider: c.provider } : {}) };
       // CMR-9: the preset row your own row hides, so you can see it before you drop yours.
-      return own && !own.vendor && own.shadows ? [row, { name: c.name, category: c.category, source: 'preset', vendor: own.shadows, shadowed: true as const }] : [row];
+      const hidden = live.get(c.name) ?? (own && !own.vendor && own.shadows ? { name: c.name, category: c.category, vendor: own.shadows } : undefined);
+      return own && !own.vendor && hidden ? [row, { name: c.name, category: hidden.category, source: 'preset', vendor: hidden.vendor, shadowed: true as const }] : [row];
     }).filter((r) => (!want || r.source === want) && (!vendor || r.vendor?.toLowerCase() === vendor));
     if (p.flags.json === true) { print({ cbid, cookies: rows }); return 0; }
     for (const r of rows) io.stdout(`${r.name}\t${r.category}\t${r.source === 'preset' ? `preset ${r.vendor}${r.shadowed ? ' (shadowed by your own row)' : ''}` : r.source}\n`);
-    io.stderr(`${rows.length} row(s) in the published declaration${want ? ` from ${want === 'preset' ? 'presets' : want === 'own' ? 'your own declarations' : 'observation'}` : ''}${vendor ? ` (${vendor})` : ''}.\n`);
+    note(`${rows.length} row(s) in the published declaration${want ? ` from ${want === 'preset' ? 'presets' : want === 'own' ? 'your own declarations' : 'observation'}` : ''}${vendor ? ` (${vendor})` : ''}.\n`);
     return 0;
   }
   // A custom preset (import-manifest) is removed by its product id, which no list here knows.
@@ -943,9 +957,9 @@ async function cookiesCommand(sub: string | undefined, p: Parsed, io: CliIo, cli
     }
     const r = await client.sites.applyCookiePreset(cbid, vendor, presetParams(p), dry);
     print(r);
-    if (r.note) io.stderr(`${r.note}\n`);
-    for (const s of r.skipped ?? []) io.stderr(`skipped ${s.name}: ${s.reason}\n`);
-    if (r.manifest.status === 'waiting_on_vendor') io.stderr(`Built-in rows: ${r.manifest.waitingOn} does not publish a manifest yet (${r.manifest.item}).\n`);
+    if (r.note) note(`${r.note}\n`);
+    for (const s of r.skipped ?? []) note(`skipped ${s.name}: ${s.reason}\n`);
+    if (r.manifest.status === 'waiting_on_vendor') note(`Built-in rows: ${r.manifest.waitingOn} does not publish a manifest yet (${r.manifest.item}).\n`);
     return 0;
   }
   // Any vendor's embed manifest as a preset; what to declare; declare it (CMU-X36, CMU-D15).
@@ -957,13 +971,13 @@ async function cookiesCommand(sub: string | undefined, p: Parsed, io: CliIo, cli
     const input = file ? { manifest: (await readConfigFile(io, file)) as never } : { url: src! };
     const r = await client.sites.importCookieManifest(cbid, input, dry);
     print(r);
-    for (const s of r.skipped ?? []) io.stderr(`skipped ${s.name}: ${s.reason}\n`);
+    for (const s of r.skipped ?? []) note(`skipped ${s.name}: ${s.reason}\n`);
     return 0;
   }
   if (sub === 'suggestions') {
     const r = await client.sites.cookieSuggestions(requireSite(p, io));
     print(r);
-    io.stderr(`${r.suggestions.length} suggestion${r.suggestions.length === 1 ? '' : 's'}; ${r.vendors.length} platform${r.vendors.length === 1 ? '' : 's'} detected.\n`);
+    note(`${r.suggestions.length} suggestion${r.suggestions.length === 1 ? '' : 's'}; ${r.vendors.length} platform${r.vendors.length === 1 ? '' : 's'} detected.\n`);
     return 0;
   }
   if (sub === 'declare-suggestions') {
@@ -971,7 +985,7 @@ async function cookiesCommand(sub: string | undefined, p: Parsed, io: CliIo, cli
     const names = str(p.flags, 'names');
     const r = await client.sites.declareCookieSuggestions(cbid, names ? { names: names.split(',').map((n) => n.trim()).filter(Boolean) } : {}, dry);
     print(r);
-    io.stderr(`${dry ? 'Would declare' : 'Declared'} ${r.declaredCount} row${r.declaredCount === 1 ? '' : 's'} and ${r.presetsApplied.length} preset${r.presetsApplied.length === 1 ? '' : 's'}.\n`);
+    note(`${dry ? 'Would declare' : 'Declared'} ${r.declaredCount} row${r.declaredCount === 1 ? '' : 's'} and ${r.presetsApplied.length} preset${r.presetsApplied.length === 1 ? '' : 's'}.\n`);
     return 0;
   }
   if (sub === 'translation') {
@@ -1003,9 +1017,9 @@ async function cookiesCommand(sub: string | undefined, p: Parsed, io: CliIo, cli
     const names = list('names');
     const r = await client.sites.translateCookies(cbid, { ...(languages ? { languages } : {}), ...(names ? { names } : {}) }, dry);
     print(r);
-    for (const u of r.unsupported) io.stderr(`unsupported ${u.language}: ${u.reason}\n`);
-    for (const f of r.failed) io.stderr(`failed ${f.language}: ${f.error}\n`);
-    io.stderr(`${dry ? 'Would translate' : 'Translated'} ${r.translated} entr${r.translated === 1 ? 'y' : 'ies'} on ${r.rows} row${r.rows === 1 ? '' : 's'} (${r.characters} characters).\n`);
+    for (const u of r.unsupported) note(`unsupported ${u.language}: ${u.reason}\n`);
+    for (const f of r.failed) note(`failed ${f.language}: ${f.error}\n`);
+    note(`${dry ? 'Would translate' : 'Translated'} ${r.translated} entr${r.translated === 1 ? 'y' : 'ies'} on ${r.rows} row${r.rows === 1 ? '' : 's'} (${r.characters} characters).\n`);
     return 0;
   }
   if (sub === 'delete-observed') {
@@ -1015,7 +1029,7 @@ async function cookiesCommand(sub: string | undefined, p: Parsed, io: CliIo, cli
     if (dry) print(await client.sites.deleteObservedCookie(cbid, name, dry));
     else {
       await client.sites.deleteObservedCookie(cbid, name);
-      io.stderr(`Removed ${name}.\n`);
+      note(`Removed ${name}.\n`);
     }
     return 0;
   }
@@ -1026,7 +1040,7 @@ async function cookiesCommand(sub: string | undefined, p: Parsed, io: CliIo, cli
     const until = str(p.flags, 'until');
     const r = await client.sites.purgeObservedCookies(cbid, { since, ...(until ? { until } : {}) }, dry);
     print(r);
-    io.stderr(`${dry ? 'Would remove' : 'Removed'} ${r.count} row${r.count === 1 ? '' : 's'}.\n`);
+    note(`${dry ? 'Would remove' : 'Removed'} ${r.count} row${r.count === 1 ? '' : 's'}.\n`);
     return 0;
   }
   throw new UsageError(`unknown cookies command: ${sub ?? '(none)'}`);
