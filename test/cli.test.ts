@@ -330,8 +330,11 @@ describe('executors presets / upgrade-preset / test --canary', () => {
     const bad = harness({ respond: () => ({ status: 200, body: { ok: false, code: 'base_url_redirects' } }) });
     expect(await run(['executors', 'test', 'ex_1', '--canary'], bad.io)).toBe(1);
     expect(bad.calls[0]!.body).toEqual({ canary: true, operation: 'locate' });
-    const good = harness({ respond: () => ({ status: 200, body: { ok: true } }) });
+    const good = harness({ respond: () => ({ status: 200, body: { ok: true, matched: true } }) });
     expect(await run(['executors', 'test', 'ex_1', '--canary'], good.io)).toBe(0);
+    // CM-18: an ok answer that did not find the canary is the failure the canary exists to catch.
+    const noMatch = harness({ respond: () => ({ status: 200, body: { ok: true, matched: false, verdict: 'no record (noMatch)' } }) });
+    expect(await run(['executors', 'test', 'ex_1', '--canary'], noMatch.io)).toBe(1);
     expect(await run(['executors', 'test', 'ex_1', '--canary', '--email', 'a@b.co'], harness().io)).toBe(2);
   });
 });

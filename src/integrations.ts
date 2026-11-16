@@ -128,18 +128,36 @@ export async function provisionCommand(file: string | undefined, io: CliIo, clie
   return r.summary.failed ? 1 : 0;
 }
 
-/** `cookiemunch partners list|link|unlink --site <cbid> …` */
+/** `cookiemunch partners list|link|update|unlink --site <cbid> …` */
 export async function partnersCommand(sub: string | undefined, rest: string[], io: CliIo, client: CookieMunchClient, h: Helpers): Promise<number> {
   const cbid = h.requireSite();
   if (sub === 'list') { out(io, await client.sites.listPartners(cbid)); return 0; }
   if (sub === 'link') {
     const partner = h.flag('partner');
     const externalId = h.flag('external-id');
-    if (typeof partner !== 'string' || !/^[a-z][a-z0-9_]{1,39}$/.test(partner)) throw h.usage('--partner <id> is required: forumulate, atlas, chatly, referalli, or one registered on the deployment');
-    if (typeof externalId !== 'string') throw h.usage('--external-id <the partner’s account id> is required');
+    if (typeof partner !== 'string' || !/^[a-z][a-z0-9_]{1,39}$/.test(partner)) throw h.usage('--partner <id> is required: any partner `cookiemunch partners list` shows (forumulate, atlas, chatly, referalli, hermetica, or one registered on the deployment)');
+    if (typeof externalId !== 'string') {
+      // CM-16: name the id this partner needs (the catalogue knows it), not a generic flag error.
+      const cat = ((await client.sites.listPartners(cbid).catch(() => null)) as { partners?: Array<{ id: string; externalIdLabel?: string; externalIdPrefix?: string }> } | null)?.partners ?? [];
+      const def = cat.find((x) => x.id === partner);
+      if (cat.length && !def) throw h.usage(`unknown partner "${partner}" for this deployment: it knows ${cat.map((x) => x.id).join(', ')}`);
+      throw h.usage(`--external-id is required: ${def?.externalIdLabel ? `the ${def.externalIdLabel}${def.externalIdPrefix ? ` (${def.externalIdPrefix}…)` : ''}` : 'the partner’s account id'}`);
+    }
     const label = h.flag('label');
     const input: PartnerLinkCreate = { partner, externalId, ...(typeof label === 'string' ? { label } : {}) };
     out(io, await client.sites.linkPartner(cbid, input, { dryRun: h.flag('dry-run') === true }));
+    return 0;
+  }
+  if (sub === 'update') {
+    const id = rest[0];
+    if (!id) throw h.usage('usage: cookiemunch partners update <linkId> --site <cbid> [--external-id <id>] [--label <text>] [--dry-run]');
+    const externalId = h.flag('external-id');
+    const label = h.flag('label');
+    if (typeof externalId !== 'string' && typeof label !== 'string') throw h.usage('send --external-id <id>, --label <text> or both');
+    const input = { ...(typeof externalId === 'string' ? { externalId } : {}), ...(typeof label === 'string' ? { label } : {}) };
+    const r = await client.sites.updatePartner(cbid, id, input, { dryRun: h.flag('dry-run') === true });
+    out(io, r);
+    for (const w of r.warnings ?? []) io.stderr(`warning: ${w}\n`);
     return 0;
   }
   if (sub === 'unlink') {
@@ -148,7 +166,7 @@ export async function partnersCommand(sub: string | undefined, rest: string[], i
     out(io, await client.sites.unlinkPartner(cbid, id));
     return 0;
   }
-  throw h.usage('usage: cookiemunch partners list|link|unlink --site <cbid>');
+  throw h.usage('usage: cookiemunch partners list|link|update|unlink --site <cbid>');
 }
 
 /** `cookiemunch keys report [--unused-days n] [--expiring-days n] [--json]` */

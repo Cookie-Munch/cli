@@ -26,7 +26,7 @@
  *   cookiemunch whoami
  *   cookiemunch health       [--site <cbid>] [--json] [--fail-on error|warning|never]
  *   cookiemunch provision    <file> [--dry-run]
- *   cookiemunch partners     list|link|unlink --site <cbid> …
+ *   cookiemunch partners     list|link|update|unlink --site <cbid> …
  *   cookiemunch consent-sync status|rotate|remove|token --site <cbid> …
  *   cookiemunch csp          --merge <vendors|urls> [--framework next|express|nginx] [--site <cbid>]
  *
@@ -101,7 +101,8 @@ Usage:
       Try a connected system against one person without filing a request.
       --operation defaults to locate (lookup is accepted as another name for it).
       --canary uses the organisation's canary address instead: no real person, and
-      a canary locate also updates the connection's health. Exits 1 when not ok.
+      a canary locate also updates the connection's health and is graded: found is a
+      conformance pass, anything else a FAIL. Exits 1 when not ok or not found.
   cookiemunch executors webhook-test <id> --headers-file <json> --body-file <file>
       Would this webhook delivery verify? Sends the headers (a JSON object) and the
       body file byte for byte to the receiver's check; nothing is acted on. Prints
@@ -233,11 +234,15 @@ Usage:
       Key hygiene: keys unused for n days (default 90), keys with broad access, and
       keys expiring within n days (default 14). Needs a full-access key.
   cookiemunch partners list --site <cbid>
-  cookiemunch partners link --site <cbid> --partner <id> [--external-id <id>] [--label <text>] [--dry-run]
+  cookiemunch partners link --site <cbid> --partner <id> --external-id <id> [--label <text>] [--dry-run]
+  cookiemunch partners update <linkId> --site <cbid> [--external-id <id>] [--label <text>] [--dry-run]
   cookiemunch partners unlink <linkId> --site <cbid>
       Grant a partner platform the site's consent events (no secret is created), list
-      the grants, or revoke one. Any partner this deployment knows (forumulate, atlas, chatly,
-      referalli, or one registered for it).
+      the grants, fix a grant's account id or label in place (the grant and any executor
+      key stay; a key minted for the old account is named to re-mint), or revoke one.
+      Any partner this deployment knows (forumulate, atlas, chatly, referalli, hermetica,
+      or one registered for it); "partners list" shows each one's externalIdLabel, the
+      account id --external-id takes, and the requiredScopes of the key.
   cookiemunch token exchange --subject-token-env NAME --scope <a,b> --resource org:<id>|site:<cbid> [--expires-in <s>]
       Swap your identity provider's token (read from the variable NAME) for a short-lived, scoped
       API key (at most 1 hour); prints the key alone. Needs no API key.
@@ -393,7 +398,7 @@ const POSITIONALS: Record<string, number> = Object.fromEntries([
   'cookies diff', 'cookies push', 'cookies preset', 'cookies unpreset', 'cookies import-manifest', 'cookies delete-observed', 'cookies translation',
   'executors pull', 'executors diff', 'executors push', 'executors test', 'executors webhook-test', 'executors deliveries', 'executors conformance',
   'executors roll-completion-secret', 'executors upgrade-preset', 'executors recheck', 'executors health', 'executors connect', 'executors activate',
-  'partners list', 'partners link', 'partners unlink',
+  'partners list', 'partners link', 'partners update', 'partners unlink',
 ].map((k) => [k, 1]));
 
 /** A word nothing reads, such as a site after --with-cbid, would be dropped and the command would act elsewhere. */
@@ -481,7 +486,7 @@ function proposed(current: Record<string, unknown>, file: Record<string, unknown
 }
 
 /** This package's version, sent in the default User-Agent (a test pins it to package.json). */
-export const CLI_VERSION = '0.26.0';
+export const CLI_VERSION = '0.27.0';
 
 /** `COOKIEMUNCH_USER_AGENT`, else `cookiemunch-cli/<version>`. */
 function userAgent(io: CliIo): string {
@@ -787,6 +792,12 @@ async function executorsCommand(
     const r = await rawRequest(io, base, key, 'POST', `/dsar/executors/${encodeURIComponent(id)}/test`, canary ? { canary: true, operation } : { email, operation });
     io.stdout(`${JSON.stringify(r, null, 2)}\n`);
     // A canary test is a health check: a failing one fails the command, so it can gate a deploy.
+    if (canary && operation === 'locate') {
+      // CM-18: grade it. The canary must be FOUND; no_match is the failure the canary exists to catch.
+      const found = (r as { matched?: unknown }).matched === true;
+      io.stderr(found ? 'found: conformance pass\n' : 'no_match: conformance FAIL, the canary subject must be reported as found (rule lookup.email.found)\n');
+      return found && (r as { ok?: unknown }).ok !== false ? 0 : 1;
+    }
     return canary && (r as { ok?: unknown }).ok === false ? 1 : 0;
   } catch (e) {
     // The API's generic route miss is a bare `not found`; an unknown connection says so.

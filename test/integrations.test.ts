@@ -97,6 +97,27 @@ describe('cookiemunch partners', () => {
     expect(await run(['partners', 'unlink', 'pl1', '--site', 'acme'], h.io)).toBe(0);
     expect(h.calls[2]).toMatchObject({ method: 'DELETE', url: 'https://api.test/v1/sites/acme/partners/pl1' });
   });
+  it('a missing --external-id names the id that partner needs, in one line, and an unknown partner is named (CM-16)', async () => {
+    const cat = { links: [], partners: [{ id: 'hermetica', externalIdLabel: 'Hermetica workspace id' }, { id: 'referalli', externalIdLabel: 'Referalli organisation id', externalIdPrefix: 'org_' }] };
+    const h = harness({ respond: () => ({ status: 200, body: cat }) });
+    expect(await run(['partners', 'link', '--site', 'acme', '--partner', 'hermetica'], h.io)).toBe(2);
+    expect(await run(['partners', 'link', '--site', 'acme', '--partner', 'referalli'], h.io)).toBe(2);
+    expect(await run(['partners', 'link', '--site', 'acme', '--partner', 'nope'], h.io)).toBe(2);
+    const err = h.err();
+    expect(err).toContain('--external-id is required: the Hermetica workspace id');
+    expect(err).toContain('the Referalli organisation id (org_…)');
+    expect(err).toContain('unknown partner "nope" for this deployment: it knows hermetica, referalli');
+    expect(err).not.toContain('from the command line');
+  });
+
+  it('updates a link in place (CM-17), printing warnings to stderr', async () => {
+    const h = harness({ respond: (c) => (c.url.includes('/partners/') ? { status: 200, body: { change: 'updated', link: { id: 'pl1' }, warnings: ['executor connection ex1 holds a key: re-mint it'] } } : undefined) });
+    expect(await run(['partners', 'update', 'pl1', '--site', 'acme', '--external-id', 'org_new', '--dry-run'], h.io)).toBe(0);
+    expect(h.calls[0]).toMatchObject({ method: 'PATCH', url: 'https://api.test/v1/sites/acme/partners/pl1?dryRun=1', body: { externalId: 'org_new' } });
+    expect(h.err()).toMatch(/warning: executor connection ex1/);
+    expect(await run(['partners', 'update', 'pl1', '--site', 'acme'], h.io)).toBe(2);
+    expect(h.calls).toHaveLength(1);
+  });
 });
 
 describe('cookiemunch keys report', () => {
