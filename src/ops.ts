@@ -455,6 +455,26 @@ export async function bundleCommand(sub: 'plan' | 'apply', io: CliIo, client: Co
     if (v.secretEnv !== undefined && (typeof v.secretEnv !== 'string' || !io.env[v.secretEnv])) throw h.usage(`${path}: ${part}.secretEnv ${String(v.secretEnv)} is not set. Nothing was sent.`);
   }
   const plans: PartPlan[] = [];
+  // The cookies part and every preset but custom go to the server as ONE run: POST …/cookies/plan to check it,
+  // POST …/cookies/apply to store it all or nothing (CMR-16), so apply does what plan showed and a refusal writes nothing.
+  const declarationRun = (forApply: boolean) => {
+    const presetsOnly = forApply && h.flag('presets-only') === true;
+    const presets = Object.fromEntries((b.presets ?? []).filter((p) => !p.pinned && !(forApply && p.vendor === 'custom')).map((p) => [p.vendor, p.params ?? {}]));
+    return {
+      ...(b.cookies && !presetsOnly ? { cookies: b.cookies, ...(b.replaceCookies === true ? { replace: true } : {}) } : {}),
+      ...(handOver.size && !presetsOnly ? { handOver: [...handOver] } : {}),
+      ...(Object.keys(presets).length ? { presets } : {}),
+    };
+  };
+  let stored: Promise<string> | undefined;
+  const runDeclarations = () => {
+    if (stored) return stored.then(() => 'stored in the run above');
+    stored = client.sites.applyCookies(cbid, declarationRun(true) as never).then((r) => {
+      const handed = ((r.steps[0] as { handedOver?: string[] } | undefined)?.handedOver) ?? [];
+      return `cookies and presets stored in one run: ${r.diff.added.length} added, ${r.diff.removed.length} removed, ${r.diff.changed.length} changed${handed.length ? `; ${handed.join(', ')} handed over` : ''}`;
+    });
+    return stored;
+  };
 
   if (b.site) {
     const patch = { ...(b.site.domain ? { domain: b.site.domain } : {}), ...(b.site.name !== undefined ? { name: b.site.name } : {}), ...(b.site.aliases ? { aliases: b.site.aliases } : {}) };
@@ -482,16 +502,9 @@ export async function bundleCommand(sub: 'plan' | 'apply', io: CliIo, client: Co
     plans.push({
       part: 'cookies', changes: d.added.length + removed.length + d.changed.length,
       detail: [...d.added.map((c) => `+ ${c.name}`), ...removed.map((c) => `- ${c.name}${handOver.has(c.name) ? ' (handed over to its preset)' : ''}`), ...d.changed.map((c) => `~ ${c.name}`)], info,
-      apply: async () => {
-        const s = await client.sites.declareCookies(cbid, b.cookies as never, replace ? { replace: true } : undefined);
-        const gone = replace ? [] : removed.map((c) => c.name);
-        for (const n of gone) await client.sites.undeclareCookie(cbid, n);
-        const n = (s.removed ?? 0) + gone.length;
-        return `${s.saved} declaration(s) saved${n ? `, ${n} removed` : ''}`;
-      },
+      apply: () => runDeclarations(),
     });
   }
-  const handedTo = new Map<string, string>();
   for (const p of b.presets ?? []) {
     const r = await client.sites.applyCookiePreset(cbid, p.vendor as never, (p.params ?? {}) as never, { dryRun: true });
     const d = (r as { diff?: { added: unknown[]; removed: unknown[]; changed: Array<{ name?: string; before?: unknown; after?: unknown }> } }).diff;
@@ -508,25 +521,39 @@ export async function bundleCommand(sub: 'plan' | 'apply', io: CliIo, client: Co
     // A hand-written row of the same name keeps the preset from declaring it (FormFlow 2026-11-12).
     const fileOwn = new Set((b.cookies ?? []).map((c) => c.name));
     const dupes = ((r as { skipped?: Array<{ name: string; reason: string }> }).skipped ?? []).filter((s) => s.reason.startsWith('you declared it yourself'));
-    // A pinned preset is never applied, so it cannot take a row over.
-    if (!p.pinned) for (const s of dupes) if (handOver.has(s.name)) handedTo.set(s.name, p.vendor);
     const dupeInfo = dupes.filter((s) => !handOver.has(s.name)).map((s) => `${s.name}: your own row, and the ${p.vendor} preset declares it too; yours is kept${fileOwn.has(s.name) ? '. Drop it from cookies' : '. It is not in this file'} and list it in "handOver", and the preset takes it over`);
-    const handedInfo = dupes.filter((s) => handOver.has(s.name) && !p.pinned).map((s) => `${s.name}: handed over; the ${p.vendor} preset declares it once your row is removed`);
     // Each plan states the revision in force, so a revision taken up server-side (presets.autoSync, or an earlier apply) is still visible.
     const builtinRev = (r as { revision?: string }).revision;
     const at = up ? `manifest ${up.latest}${up.applied === up.latest ? ', applied' : ''}` : `built-in rows${builtinRev ? ` (${builtinRev})` : ''}`;
     // A pinned preset never counts as a change: it is reported, and apply has nothing to do for it.
     if (p.pinned) {
-      plans.push({ part: 'presets', item: p.vendor, changes: 0, detail: [], rows, info: [n ? `preset ${p.vendor}: pinned, ${n} upstream change(s) not followed${moved}` : `preset ${p.vendor}: pinned (${at})`, ...dupeInfo, ...handedInfo] });
+      plans.push({ part: 'presets', item: p.vendor, changes: 0, detail: [], rows, info: [n ? `preset ${p.vendor}: pinned, ${n} upstream change(s) not followed${moved}` : `preset ${p.vendor}: pinned (${at})`, ...dupeInfo] });
       continue;
     }
     // A handed-over row counts as a change, so apply re-applies the preset after your row is removed.
     const taken = dupes.filter((s) => handOver.has(s.name)).length;
-    plans.push({ part: 'presets', item: p.vendor, changes: n + taken, detail: n ? [`preset ${p.vendor}: ${n} declaration change(s)${moved}`] : [], rows, info: [...(n ? [] : [`preset ${p.vendor}: ${at}, every declaration matches`]), ...dupeInfo, ...handedInfo], apply: async () => { await client.sites.applyCookiePreset(cbid, p.vendor as never, (p.params ?? {}) as never); return `preset ${p.vendor} applied`; } });
+    plans.push({ part: 'presets', item: p.vendor, changes: n + taken, detail: n ? [`preset ${p.vendor}: ${n} declaration change(s)${moved}`] : [], rows, info: [...(n ? [] : [`preset ${p.vendor}: ${at}, every declaration matches`]), ...dupeInfo],
+      // A custom preset registers its manifest as it applies, so it keeps its own call; every other preset is in the one run.
+      apply: p.vendor === 'custom' ? async () => { await client.sites.applyCookiePreset(cbid, p.vendor as never, (p.params ?? {}) as never); return `preset ${p.vendor} applied`; } : () => runDeclarations() });
   }
-  // A handed-over row no preset here declares would leave the published policy: refuse before anything is sent.
-  const orphan = [...handOver].filter((n) => !handedTo.has(n));
-  if (orphan.length) throw h.usage(`${path}: handOver ${orphan.join(', ')}: no preset in this file declares ${orphan.length > 1 ? 'them' : 'it'}, so ${orphan.length > 1 ? 'they' : 'it'} would leave the published policy. Nothing was sent.`);
+  // CMR-16: the hand-over is the server's to judge, on the same run plan and apply both send (POST …/cookies/plan),
+  // so a row already handed over (a retry) passes, and a row no preset declares is refused before anything is sent.
+  if (handOver.size) {
+    let checked: Awaited<ReturnType<typeof client.sites.planCookies>>;
+    try {
+      checked = await client.sites.planCookies(cbid, declarationRun(false) as never);
+    } catch (e) {
+      const body = errorBody(e);
+      if (body.step === 'handOver') throw h.usage(`${path}: ${String(body.error).replace(/Nothing was stored\.$/, 'Nothing was sent.')}`);
+      throw e;
+    }
+    const handedNow = new Set(((checked.steps[0] as { handedOver?: string[] } | undefined)?.handedOver) ?? []);
+    for (const n of handOver) {
+      const vendor = checked.declared.find((d) => d.name === n)?.vendor;
+      const part = plans.find((x) => x.part === 'presets' && x.item === vendor);
+      part?.info?.push(handedNow.has(n) ? `${n}: handed over; the ${vendor} preset declares it once your row is removed` : `${n}: handed over already; the ${vendor} preset declares it`);
+    }
+  }
   if (b.rightsPage) {
     const r = await client.rightsPage.dryRun(cbid, b.rightsPage, { mode: 'put' });
     const diff = ((r as { diff?: Array<{ path: string }> }).diff ?? []);

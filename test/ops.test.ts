@@ -368,10 +368,15 @@ describe('plan: preset drift', () => {
     expect(r.out()).toMatch(/cookies: 1 change\(s\)\n  - lc_consent/);
   });
 
-  it('CMR-10: handOver removes only the named rows and re-applies the preset that declares them', async () => {
+  it('CMR-10/16: handOver goes to the server as one run, plan and apply judge it alike, and apply stores it in one call', async () => {
+    const lucidaRow = { name: 'lc_consent', category: 'statistics', vendor: 'lucida' };
+    const run1 = (c: Call) => (c.body as { handOver?: string[] }).handOver?.includes('ff_session')
+      ? { status: 400, body: { error: 'handOver ff_session: no preset here declares it, so it would leave the published policy. Nothing was stored.', code: 'bad_request', step: 'handOver', handOver: ['ff_session'] } }
+      : { status: 200, body: { dryRun: true, steps: [{ step: 'cookies', handedOver: ['lc_consent'], diff: { added: [], removed: [], changed: [] } }], declared: [lucidaRow], count: 1, diff: { added: [], removed: [], changed: [] } } };
     const respond = ((c: Call) => {
+      if (c.url.includes('/cookies/plan')) return run1(c);
+      if (c.url.includes('/cookies/apply')) return { status: 200, body: { applied: true, steps: [{ step: 'cookies', handedOver: ['lc_consent'], diff: { added: [], removed: [], changed: [] } }], declared: [lucidaRow], count: 1, diff: { added: [], removed: [], changed: [{ name: 'lc_consent' }] } } };
       if (c.url.includes('/cookies/presets/lucida')) return { status: 200, body: { dryRun: true, diff: { added: [], removed: [], changed: [] }, skipped: [{ name: 'lc_consent', reason: 'you declared it yourself; your declaration is kept' }] } };
-      if (c.method === 'DELETE') return { status: 204 };
       if (c.url.includes('/cookies')) return { status: 200, body: { dryRun: true, declared: [], saved: 1, removed: 0, diff: { added: [], removed: [{ name: 'lc_consent' }, { name: 'ff_session' }], changed: [] } } };
       return undefined;
     }) as never;
@@ -381,16 +386,33 @@ describe('plan: preset drift', () => {
     expect(h.out()).toMatch(/cookies: 1 change\(s\)\n  - lc_consent \(handed over to its preset\)/);
     expect(h.out()).toMatch(/kept: ff_session: /);
     expect(h.out()).toMatch(/lc_consent: handed over; the lucida preset declares it once your row is removed/);
+    expect(h.calls.find((c) => c.url.includes('/cookies/plan'))!.body).toEqual({ cookies: [{ name: 'own_a', category: 'necessary' }], handOver: ['lc_consent'], presets: { lucida: {} } });
+
     const a = harness({ files: { 'c.json': file }, respond });
     expect(await run(['apply', 'c.json'], a.io)).toBe(0);
-    const order = a.calls.filter((c) => c.method !== 'GET' && !/dryRun/.test(c.url)).map((c) => `${c.method} ${c.url.replace(/^https?:\/\/[^/]+/, '')}`);
-    expect(order.some((x) => /^DELETE .*\/cookies\/lc_consent/.test(x))).toBe(true);
-    expect(order.some((x) => /^DELETE .*ff_session/.test(x))).toBe(false);
-    expect(order.findIndex((x) => /^DELETE .*lc_consent/.test(x))).toBeLessThan(order.findIndex((x) => /^PUT .*\/cookies\/presets\/lucida/.test(x)));
-    // A name no preset here declares would leave the policy: refused before anything is sent.
+    const writes = a.calls.filter((c) => c.method !== 'GET' && !/dryRun|\/cookies\/plan/.test(c.url));
+    // One all-or-nothing call: no separate DELETE of the row, no separate preset PUT.
+    expect(writes.map((c) => `${c.method} ${c.url.replace(/^https?:\/\/[^/]+/, '')}`)).toEqual(['POST /v1/sites/c1/cookies/apply']);
+    expect(writes[0]!.body).toEqual({ cookies: [{ name: 'own_a', category: 'necessary' }], handOver: ['lc_consent'], presets: { lucida: {} } });
+    expect(a.err()).toMatch(/lc_consent handed over/);
+
+    // The state FormFlow was refused in: the row already handed over, so no dry run reports it skipped. Plan and apply both pass.
+    const after = ((c: Call) => {
+      if (c.url.includes('/cookies/plan')) return { status: 200, body: { dryRun: true, steps: [{ step: 'cookies', diff: { added: [], removed: [], changed: [] } }], declared: [lucidaRow], count: 1, diff: { added: [], removed: [], changed: [] } } };
+      if (c.url.includes('/cookies/presets/lucida')) return { status: 200, body: { dryRun: true, diff: { added: [], removed: [], changed: [] } } };
+      if (c.url.includes('/cookies')) return { status: 200, body: { dryRun: true, declared: [], saved: 1, removed: 0, diff: { added: [], removed: [], changed: [] } } };
+      return undefined;
+    }) as never;
+    const r = harness({ files: { 'c.json': file }, respond: after });
+    expect(await run(['plan', 'c.json'], r.io)).toBe(0);
+    expect(r.out()).toMatch(/lc_consent: handed over already; the lucida preset declares it/);
+    expect(await run(['apply', 'c.json'], harness({ files: { 'c.json': file }, respond: after }).io)).toBe(0);
+
+    // A name no preset declares would leave the policy: the server refuses it, before anything is sent.
     const o = harness({ files: { 'c.json': JSON.stringify({ site: { cbid: 'c1' }, cookies: [], handOver: ['ff_session'], presets: [{ vendor: 'lucida' }] }) }, respond });
-    expect(await run(['plan', 'c.json'], o.io)).toBe(2);
-    expect(o.err()).toMatch(/handOver ff_session: no preset in this file declares it/);
+    expect(await run(['apply', 'c.json'], o.io)).toBe(2);
+    expect(o.err()).toMatch(/handOver ff_session: no preset here declares it.*Nothing was sent\./);
+    expect(o.calls.some((c) => c.url.includes('/cookies/apply'))).toBe(false);
   });
 
   it('CMR-11: a partner grant this key may not make is reported with its fix, and the plan goes on', async () => {

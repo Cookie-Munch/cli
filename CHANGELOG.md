@@ -2,6 +2,12 @@
 
 Every published release, newest first. Dates are the day the version was cut.
 
+## 0.25.0 (2026-11-16)
+
+- Fixed: `plan` and `apply` give the same answer on `handOver`. Both send the file's cookies part and presets to the server as one run, and the server judges the hand-over on the outcome, so a row that is already handed over passes (a retry no longer fails with "no preset in this file declares them").
+- Changed: `apply` stores the `cookies` part and every preset except `custom` in one all-or-nothing call (`POST /v1/sites/{cbid}/cookies/apply`). A refused apply writes nothing; before, your own rows could be removed and the preset not yet re-applied.
+- Needs the API from 2026-11-16 or later.
+
 ## 0.24.0 (2026-11-13)
 
 - Changed: `cookies suggestions` prints a table (one line per platform detected, then one per suggestion: name, storage, category, preset or confidence, reason); `--json` prints the document as before.
