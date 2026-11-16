@@ -12,7 +12,8 @@
  *   cookiemunch plan|apply <cookiemunch.json>
  *
  * Exit codes everywhere: 0 ok (or no changes), 1 a difference, a failure or a failed check, 2 a usage mistake,
- * 3 from `plan --exit-code` when the only difference is upstream preset drift.
+ * 3 from `plan --exit-code` when the only difference is upstream preset drift, and from plan/apply when a part
+ * waits on a live site (rightsIdentity's key set not reachable yet).
  */
 
 import { CookieMunchApiError, type CookieMunchClient, type DsarExecutor } from '@cookiemunch/sdk';
@@ -101,6 +102,65 @@ function executorFileView(e: DsarExecutor): Record<string, Json> {
   return out;
 }
 
+const isComment = (k: string) => k.startsWith('_') || k.startsWith('x-');
+const plain = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
+const dropComments = (o: Record<string, unknown>) => Object.fromEntries(Object.entries(o).filter(([k]) => !isComment(k)));
+
+/**
+ * A file as written, made ready to read (CM-6, CM-7). Keys starting `_` or `x-` are comments only at the top,
+ * at the top of each part (not `config`), and at the top of each `executors[]` and `webhooks[]` entry: deeper
+ * down (config, cookies, presets, params) `_ga` or an `x-` header is a real key. `${env:NAME}` in any string is
+ * that variable; an unset one fails before anything is sent.
+ */
+export function prepareFile<T>(v: T, env: Record<string, string | undefined>, fail: (msg: string) => Error): T {
+  if (!plain(v)) return expandEnv(v, env, fail);
+  const top = dropComments(v);
+  for (const [k, part] of Object.entries(top)) {
+    if (k === 'executors' || k === 'webhooks') top[k] = Array.isArray(part) ? part.map((e) => (plain(e) ? dropComments(e) : e)) : part;
+    else if (k !== 'config' && plain(part)) top[k] = dropComments(part);
+  }
+  return expandEnv(top, env, fail) as T;
+}
+
+function expandEnv<T>(v: T, env: Record<string, string | undefined>, fail: (msg: string) => Error, at = ''): T {
+  if (typeof v === 'string') {
+    return v.replace(/\$\{env:([A-Za-z_][A-Za-z0-9_]*)\}/g, (_m, name: string) => {
+      const got = env[name];
+      if (got === undefined || got === '') throw fail(`${at || 'the file'}: \${env:${name}} is not set. Nothing was sent.`);
+      return got;
+    }) as T;
+  }
+  if (Array.isArray(v)) return v.map((x, i) => expandEnv(x, env, fail, `${at}[${i}]`)) as T;
+  if (plain(v)) return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, expandEnv(x, env, fail, at ? `${at}.${k}` : k)])) as T;
+  return v;
+}
+
+/**
+ * What an entry is diffed on. `secretEnv` (CM-5) is never sent, and `mintFrom` (CM-1) only says how a NEW
+ * connection gets its key: the live view does not echo it, so diffing it would be a change forever.
+ */
+function executorWant(w: Record<string, Json>, live: boolean): Record<string, Json> {
+  const { id: _i, state: _s, secretEnv: _e, ...want } = w;
+  if (live) delete want.mintFrom;
+  return want;
+}
+
+/** Why each connection to create has no key yet: none needed with mintFrom, else its secretEnv or --secret-env must be set. */
+function missingExecutorKeys(creating: Array<Record<string, Json>>, fallback: string | undefined, env: Record<string, string | undefined>): string[] {
+  const missing: string[] = [];
+  for (const w of creating) {
+    if (w.secretEnv !== undefined && typeof w.secretEnv !== 'string') { missing.push(`${String(w.system)}: secretEnv names an environment variable`); continue; }
+    if (w.mintFrom !== undefined) {
+      if (w.secretEnv !== undefined) missing.push(`${String(w.system)}: mintFrom or secretEnv, not both (the partner mints the key)`);
+      continue;
+    }
+    const name = (w.secretEnv as string | undefined) ?? fallback;
+    if (!name) missing.push(`${String(w.system)}: needs its API key: give it "secretEnv": "NAME" (or pass --secret-env NAME), or "mintFrom": "<partner>"`);
+    else if (!env[name]) missing.push(`${String(w.system)}: ${name} is not set`);
+  }
+  return missing;
+}
+
 export async function executorsFileCommand(sub: 'pull' | 'diff' | 'push', io: CliIo, client: CookieMunchClient, h: OpsHelpers): Promise<number> {
   const current = (await client.fulfillment.executors()).map(executorFileView);
   if (sub === 'pull') {
@@ -111,18 +171,18 @@ export async function executorsFileCommand(sub: 'pull' | 'diff' | 'push', io: Cl
   }
   const path = h.positional[2];
   if (!path) throw h.usage(`usage: cookiemunch executors ${sub} <file> [--secret-env NAME]`);
-  const file = await h.readJson(path);
+  const file = prepareFile(await h.readJson(path), io.env, h.usage);
   const wanted = Array.isArray(file.executors) ? (file.executors as Array<Record<string, Json>>) : null;
   if (!wanted) throw h.usage(`${path} must hold { "executors": [ … ] } (cookiemunch executors pull writes one)`);
   for (const w of wanted) {
-    for (const k of ['secretKey', 'secret', 'webhookSecret']) if (k in w) throw h.usage(`${path} carries ${k}: secrets never go in this file; pass --secret-env NAME`);
+    for (const k of ['secretKey', 'secret', 'webhookSecret']) if (k in w) throw h.usage(`${path} carries ${k}: secrets never go in this file; name a variable with "secretEnv": "NAME" (or pass --secret-env NAME)`);
   }
   const plan: Array<{ system: string; action: 'create' | 'update' | 'unchanged'; id?: string; changes: Change[] }> = [];
   for (const w of wanted) {
     const match = current.find((c) => (w.id && c.id === w.id) || (!w.id && c.system === w.system));
     // `state` says how a new connection starts; it is not something to diff against a live one.
-    const { id: _i, state: _s, ...want } = w;
-    if (!match) { plan.push({ system: String(w.system), action: 'create', changes: diffJson({}, want as Json) }); continue; }
+    if (!match) { plan.push({ system: String(w.system), action: 'create', changes: diffJson({}, executorWant(w, false) as Json) }); continue; }
+    const want = executorWant(w, true);
     const { id, ...have } = match;
     const changes = diffJson(Object.fromEntries(Object.keys(want).map((k) => [k, have[k] ?? null])) as Json, want as Json);
     plan.push({ system: String(w.system), action: changes.length ? 'update' : 'unchanged', id: String(id), changes });
@@ -133,20 +193,19 @@ export async function executorsFileCommand(sub: 'pull' | 'diff' | 'push', io: Cl
   else for (const p of pending) io.stdout(`${p.action} ${p.system}${p.id ? ` (${p.id})` : ''}\n${formatChanges(p.changes).replace(/^/gm, '  ')}\n`);
   if (sub === 'diff') return pending.length && h.flag('exit-code') === true ? 1 : 0;
   const secretEnv = str(h, 'secret-env');
+  const entry = (p: { system: string }) => wanted.find((x) => String(x.system) === p.system)!;
   // Every create needs its key BEFORE anything is applied: half a push is worse than none.
-  const creating = pending.filter((p) => p.action === 'create');
-  if (creating.length && !(secretEnv && io.env[secretEnv])) {
-    throw h.usage(`creating ${creating.map((p) => p.system).join(', ')} needs its API key: pass --secret-env NAME and export NAME`);
-  }
+  const missing = missingExecutorKeys(pending.filter((p) => p.action === 'create').map(entry), secretEnv, io.env);
+  if (missing.length) throw h.usage(`${path}: ${missing.join('; ')}. Nothing was sent.`);
   for (const p of pending) {
-    const w = wanted.find((x) => String(x.system) === p.system)!;
-    const { id: _i, ...body } = w;
+    const w = entry(p);
+    const { id: _i, secretEnv: own, ...body } = w;
     if (p.action === 'update') {
       await client.fulfillment.updateExecutor(p.id!, Object.fromEntries(p.changes.map((c) => c.path.split(/[.[]/)[0]!).filter((k, i, a) => a.indexOf(k) === i).map((k) => [k, body[k]])) as never);
     } else {
-      const secretKey = secretEnv ? io.env[secretEnv] : undefined;
-      if (!secretKey) throw h.usage(`creating ${p.system} needs its API key: set --secret-env NAME and export NAME`);
-      await client.fulfillment.connectExecutor({ ...(body as object), ...(h.flag('defer') === true ? { state: 'pending' } : {}), secretKey } as never);
+      // A minted connection never carries a key: the server refuses secretKey with mintFrom.
+      const secretKey = body.mintFrom !== undefined ? undefined : io.env[(own as string | undefined) ?? secretEnv!];
+      await client.fulfillment.connectExecutor({ ...(body as object), ...(h.flag('defer') === true ? { state: 'pending' } : {}), ...(secretKey ? { secretKey } : {}) } as never);
     }
   }
   io.stderr(`Applied ${pending.length} change(s).\n`);
@@ -428,7 +487,7 @@ const fieldLines = (cur: Record<string, unknown>, want: Record<string, unknown>)
 /** A list part names its items on its line when it has more than one. */
 const items = (names: string[]) => (names.length > 1 ? names.join(', ') : undefined);
 
-interface PartPlan { part: Part; item?: string | undefined; changes: number; detail: string[]; rows?: string[]; info?: string[]; presets?: Array<{ system: unknown; preset: string; presetVersion?: number; latestVersion?: number; pinned: boolean }>; notApplied?: string[]; blocked?: string[]; apply?: () => Promise<string> }
+interface PartPlan { part: Part; item?: string | undefined; changes: number; detail: string[]; rows?: string[]; info?: string[]; presets?: Array<{ system: unknown; preset: string; presetVersion?: number; latestVersion?: number; pinned: boolean }>; notApplied?: string[]; blocked?: string[]; pending?: string[]; apply?: () => Promise<string> }
 
 /**
  * One file for everything a site's privacy setup is (CMU-D12). `plan` asks the server's dry run of every part
@@ -439,7 +498,7 @@ interface PartPlan { part: Part; item?: string | undefined; changes: number; det
  */
 export async function bundleCommand(sub: 'plan' | 'apply', io: CliIo, client: CookieMunchClient, h: OpsHelpers): Promise<number> {
   const path = h.positional[1] ?? 'cookiemunch.json';
-  const b = (await h.readJson(path)) as unknown as Bundle;
+  const b = prepareFile(await h.readJson(path), io.env, h.usage) as unknown as Bundle;
   for (const k of Object.keys(b)) if (!(PARTS as readonly string[]).includes(k) && k !== '$schema' && k !== 'replaceCookies' && k !== 'handOver') throw h.usage(`${path}: unknown part ${k}; parts are ${PARTS.join(', ')} (and the replaceCookies and handOver switches)`);
   if (b.replaceCookies !== undefined && typeof b.replaceCookies !== 'boolean') throw h.usage(`${path}: replaceCookies is true or false`);
   if (b.handOver !== undefined && (!Array.isArray(b.handOver) || b.handOver.some((n) => typeof n !== 'string' || !n))) throw h.usage(`${path}: handOver is a list of cookie names`);
@@ -561,9 +620,19 @@ export async function bundleCommand(sub: 'plan' | 'apply', io: CliIo, client: Co
   }
   if (b.rightsIdentity) {
     // The server's dry run fetches and checks the key set; the timestamps it would stamp are not a change.
-    const r = await client.rightsIdentity.set(cbid, b.rightsIdentity as never, { dryRun: true });
-    const diff = (r.diff ?? []).filter((d) => d.path !== 'verifiedAt' && d.path !== 'updatedAt');
-    plans.push({ part: 'rightsIdentity', changes: diff.length, detail: diff.map((d) => `${d.path}: ${JSON.stringify(d.from ?? null)} → ${JSON.stringify(d.to ?? null)}`), apply: async () => { const s = await client.rightsIdentity.set(cbid, b.rightsIdentity as never); return `sign-in provider ${s.type ?? ''} saved (${s.issuer ?? ''})`; } });
+    let waiting: string | undefined;
+    const r = await client.rightsIdentity.set(cbid, b.rightsIdentity as never, { dryRun: true }).catch((e: unknown) => {
+      // CM-2: a key set on a site not deployed yet holds back this part only; the rest plans and applies, and the run exits 3.
+      if (!(e instanceof CookieMunchApiError) || e.status !== 424 || e.code !== 'identity_jwks_unreachable') throw e;
+      // jwksUrl may be derived from the issuer server-side: its message names the address it tried.
+      waiting = typeof b.rightsIdentity!.jwksUrl === 'string' ? b.rightsIdentity!.jwksUrl : /key set at (\S+)/.exec(e.message)?.[1] ?? 'the key set';
+      return null;
+    });
+    if (!r) plans.push({ part: 'rightsIdentity', changes: 0, detail: [], pending: [`waiting on a live site: ${waiting} not reachable yet; re-run apply after deploy`] });
+    else {
+      const diff = (r.diff ?? []).filter((d) => d.path !== 'verifiedAt' && d.path !== 'updatedAt');
+      plans.push({ part: 'rightsIdentity', changes: diff.length, detail: diff.map((d) => `${d.path}: ${JSON.stringify(d.from ?? null)} → ${JSON.stringify(d.to ?? null)}`), apply: async () => { const s = await client.rightsIdentity.set(cbid, b.rightsIdentity as never); return `sign-in provider ${s.type ?? ''} saved (${s.issuer ?? ''})`; } });
+    }
   }
   if (b.rightsCaptcha) {
     const { secretEnv, ...want } = b.rightsCaptcha;
@@ -604,9 +673,9 @@ export async function bundleCommand(sub: 'plan' | 'apply', io: CliIo, client: Co
     const info: string[] = [];
     const presets: Array<{ system: unknown; preset: string; presetVersion?: number; latestVersion?: number; pinned: boolean }> = [];
     for (const w of b.executors) {
-      for (const k of ['secretKey', 'secret', 'webhookSecret']) if (k in w) throw h.usage(`${path}: executors carry no secrets (${k}); use --secret-env`);
+      for (const k of ['secretKey', 'secret', 'webhookSecret']) if (k in w) throw h.usage(`${path}: executors carry no secrets (${k}); name a variable with "secretEnv": "NAME" (or pass --secret-env)`);
       const m = current.find((c) => c.system === w.system);
-      const { id: _i, state: _s, ...want } = w;
+      const want = executorWant(w, !!m);
       const changes = m ? diffJson(Object.fromEntries(Object.keys(want).map((k) => [k, m[k] ?? null])) as Json, want as Json) : diffJson({}, want as Json);
       if (changes.length) { n++; detail.push(`${m ? 'update' : 'create'} ${String(w.system)}`); rows.push(`${String(w.system)}: ${formatChanges(changes)}`); }
       const e = live.find((x) => x.system === w.system) as unknown as { id: string; preset?: string; presetVersion?: number; presetLatestVersion?: number; presetPinned?: boolean } | undefined;
@@ -616,6 +685,11 @@ export async function bundleCommand(sub: 'plan' | 'apply', io: CliIo, client: Co
           ? `preset ${e.preset}: pinned at v${e.presetVersion} (presetPinned), not following v${e.presetLatestVersion}`
           : `preset ${e.preset}: v${e.presetVersion} -> v${e.presetLatestVersion} available (cookiemunch executors upgrade-preset ${e.id})`);
       }
+    }
+    // Checked while planning, so apply fails before any part is written.
+    if (sub === 'apply') {
+      const missing = missingExecutorKeys(b.executors.filter((w) => !current.some((c) => c.system === w.system)), str(h, 'secret-env'), io.env);
+      if (missing.length) throw h.usage(`${path}: executors: ${missing.join('; ')}. Nothing was sent.`);
     }
     plans.push({ part: 'executors', item: items(b.executors.map((w) => String(w.system))), changes: n, detail, rows, info, presets, apply: async () => { await executorsFileCommand('push', io, client, { ...h, positional: ['executors', 'push', path], readJson: async () => ({ executors: b.executors }) }); return 'executors pushed'; } });
   }
@@ -731,6 +805,7 @@ export async function bundleCommand(sub: 'plan' | 'apply', io: CliIo, client: Co
   }
 
   const total = plans.reduce((n, p) => n + p.changes, 0);
+  const pendingParts = plans.filter((p) => p.pending?.length);
   if (sub === 'plan') {
     if (json(h)) print(io, { file: path, cbid, changes: total, parts: plans.map(({ apply: _a, ...p }) => p) });
     else for (const p of plans) {
@@ -745,17 +820,19 @@ export async function bundleCommand(sub: 'plan' | 'apply', io: CliIo, client: Co
       if (shown.length < rows.length) io.stdout(`    … and ${rows.length - shown.length} more (--detail lists every one)\n`);
       for (const d of p.notApplied ?? []) io.stdout(`  not applied: ${d} (the server's dry run does not keep it)\n`);
       for (const d of p.blocked ?? []) io.stdout(`  blocked: ${d}\n`);
+      for (const d of p.pending ?? []) io.stdout(`  pending: ${d}\n`);
     }
     const unapplied = plans.reduce((n, p) => n + (p.notApplied?.length ?? 0), 0);
-    if (!json(h)) io.stderr(total ? `${total} change(s) in ${plans.filter((p) => p.changes).length} part(s). Apply with: cookiemunch apply ${path}\n` : unapplied ? '' : `No changes: all ${plans.length} part(s) match.\n`);
+    if (!json(h)) io.stderr(total ? `${total} change(s) in ${plans.filter((p) => p.changes).length} part(s). Apply with: cookiemunch apply ${path}\n` : unapplied || pendingParts.length ? '' : `No changes: all ${plans.length} part(s) match.\n`);
     if (unapplied && !json(h)) io.stderr(`${unapplied} field(s) in ${path} would not be applied.\n`);
     const blockedN = plans.reduce((n, p) => n + (p.blocked?.length ?? 0), 0);
     if (blockedN && !json(h)) io.stderr(`${blockedN} item(s) in ${path} this key cannot apply; each says how to fix it.\n`);
-    if (h.flag('exit-code') !== true) return 0;
+    if (pendingParts.length && !json(h)) io.stderr(`${pendingParts.map((p) => p.part).join(', ')} pending on a live site: everything else is planned. Exit 3.\n`);
+    if (h.flag('exit-code') !== true) return pendingParts.length ? 3 : 0;
     const local = plans.filter((p) => p.part !== 'presets').reduce((n, p) => n + p.changes, 0);
     if (local || unapplied || blockedN) return 1;
     // 3, not the local-drift 1 (and not 2, which is a usage mistake): only upstream presets moved.
-    return total ? 3 : 0;
+    return total || pendingParts.length ? 3 : 0;
   }
   const log: Array<{ part: Part; at: string; result: string }> = [];
   for (const p of plans) {
@@ -765,9 +842,10 @@ export async function bundleCommand(sub: 'plan' | 'apply', io: CliIo, client: Co
     log.push({ part: p.part, at: new Date().toISOString(), result });
     if (!json(h)) io.stderr(`${log[log.length - 1]!.at} ${p.part}${p.item ? ` (${p.item})` : ''}: ${result}\n`);
   }
-  if (json(h)) print(io, { file: path, cbid, applied: log });
-  else if (!log.length) io.stderr('No changes: nothing to apply.\n');
-  return 0;
+  if (json(h)) print(io, { file: path, cbid, applied: log, ...(pendingParts.length ? { pending: pendingParts.map((p) => ({ part: p.part, reason: p.pending })) } : {}) });
+  else if (!log.length && !pendingParts.length) io.stderr('No changes: nothing to apply.\n');
+  for (const p of json(h) ? [] : pendingParts) io.stderr(`${p.part}: pending: ${p.pending!.join('; ')}\n`);
+  return pendingParts.length ? 3 : 0;
 }
 
 // ---- executors connect | activate (one route for partner connections) ----

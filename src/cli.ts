@@ -23,6 +23,7 @@
  *   cookiemunch cookies list|presets|preset|unpreset|delete-observed|purge-observed|translation|translate --site <cbid> …
  *   cookiemunch site update  --site <cbid> [--domain <host> [--keep-old-domain]] [--name <name>] [--aliases a,b] [--dry-run]
  *   cookiemunch site brand   --site <cbid> [--url <https URL> | <brand.json>] [--dry-run]
+ *   cookiemunch whoami
  *   cookiemunch health       [--site <cbid>] [--json] [--fail-on error|warning|never]
  *   cookiemunch provision    <file> [--dry-run]
  *   cookiemunch partners     list|link|unlink --site <cbid> …
@@ -217,6 +218,8 @@ Usage:
   cookiemunch consent-sync token --site <cbid> --subject <id> [--ttl <seconds>]
       Sign a test token locally with COOKIEMUNCH_CONSENT_SYNC_SECRET (nothing is sent), e.g. to try
       GET /api/v1/<cbid>/profile with curl.
+  cookiemunch whoami
+      The key you hold (GET /v1/me): its organisation, scopes, and whether it is locked to some sites.
   cookiemunch health [--site <cbid>] [--json] [--fail-on error|warning|never]
       Every link the site's privacy wiring depends on, with a fix hint for each that
       fails. Exits 1 when a check fails (checks that could not run, or are waived, do not count).
@@ -253,7 +256,9 @@ Usage:
   cookiemunch executors diff <file> [--exit-code]
   cookiemunch executors push <file> [--secret-env NAME] [--defer]
       Connected systems as a file. The file never carries a secret: a new connection's API key
-      comes from the environment variable --secret-env names.
+      comes from the variable its "secretEnv": "NAME" names, else from --secret-env; an entry with
+      "mintFrom": "<partner>" needs none (the partner mints it). Every variable is checked first.
+      Keys starting _ or x- are comments; "\${env:NAME}" in a string is that variable (unset: exit 2).
   cookiemunch dsar test [--types access,deletion] [--with-cbid --site <cbid>] [--without-cbid]
                         [--email <addr>] [--cleanup]
       File TEST rights requests and read each back. --cleanup deletes exactly the ones this run
@@ -298,7 +303,10 @@ Usage:
       apply applies them in dependency order and logs each. A part not in the file is left alone. rightsCaptcha and mailProvider take
       their secret from the variable their secretEnv names; an unset one stops the run before
       anything is sent. New webhook secrets go to --secrets-out (mode 0600), unless a webhook's
-      secretEnv names a variable holding one you chose.
+      secretEnv names a variable holding one you chose. executors entries work as in executors push.
+      Keys starting _ or x- at the top of the file, a part or an entry are comments; "\${env:NAME}" in a string is that variable.
+      A rightsIdentity whose key set is not reachable yet (the site is not deployed) is pending:
+      every other part is planned and applied, and the run exits 3. Re-run apply after the deploy.
   cookiemunch scan-source [dir] [--json]
       The first-party cookie and storage names your code sets (document.cookie, cookies.set,
       cookies().set, localStorage/sessionStorage.setItem in .js/.ts/.jsx/.tsx/.vue/.svelte/.html;
@@ -317,7 +325,8 @@ Exit codes:
   0  ok, or nothing to change
   1  a difference (with --exit-code), a failure, or a failed check
   2  a usage mistake
-  3  plan --exit-code: only preset parts moved upstream, nothing in your file
+  3  plan --exit-code: only preset parts moved upstream, nothing in your file; or plan/apply:
+     a part waits on a live site (rightsIdentity's key set not reachable yet), the rest went ahead
 
 Environment:
   COOKIEMUNCH_API_KEY   an API key (cookiemunch_live_…, or a legacy fck_…). Required.
@@ -333,8 +342,12 @@ Environment:
   --idempotency-key <k> send Idempotency-Key on writes: a retry replays the first answer.
 `;
 
-/** A usage mistake: exit code 2. */
-class UsageError extends Error {}
+/** A usage mistake: exit code 2. Only a wrong invocation prints the help; a refusal of the file or the run is its one line. */
+class UsageError extends Error {
+  constructor(message: string, readonly showUsage = true) { super(message); }
+}
+/** What a command's helpers raise: `usage: …` and `unknown … command` are wrong invocations, the rest are refusals. */
+const helperUsage = (m: string) => new UsageError(m, /^(usage:|unknown \S+ command)/.test(m));
 
 interface Parsed {
   positional: string[];
@@ -445,7 +458,7 @@ async function readText(io: CliIo, path: string): Promise<string> {
   try {
     return await io.readFile(path);
   } catch (e) {
-    throw new UsageError(`cannot read ${path}: ${(e as Error).message}`);
+    throw new UsageError(`cannot read ${path}: ${(e as Error).message}`, false);
   }
 }
 
@@ -456,9 +469,9 @@ async function readConfigFile(io: CliIo, path: string | undefined): Promise<Reco
   try {
     parsed = JSON.parse(text);
   } catch (e) {
-    throw new UsageError(`${path} is not valid JSON: ${(e as Error).message}`);
+    throw new UsageError(`${path} is not valid JSON: ${(e as Error).message}`, false);
   }
-  if (!isPlainObject(parsed)) throw new UsageError(`${path} must hold a JSON object`);
+  if (!isPlainObject(parsed)) throw new UsageError(`${path} must hold a JSON object`, false);
   return parsed;
 }
 
@@ -468,7 +481,7 @@ function proposed(current: Record<string, unknown>, file: Record<string, unknown
 }
 
 /** This package's version, sent in the default User-Agent (a test pins it to package.json). */
-export const CLI_VERSION = '0.25.0';
+export const CLI_VERSION = '0.26.0';
 
 /** `COOKIEMUNCH_USER_AGENT`, else `cookiemunch-cli/<version>`. */
 function userAgent(io: CliIo): string {
@@ -1163,7 +1176,7 @@ export async function run(argv: string[], io: CliIo): Promise<number> {
     requireSite: () => requireSite(p, io),
     site: () => str(p.flags, 'site') ?? io.env.COOKIEMUNCH_SITE,
     readJson: (path) => readConfigFile(io, path),
-    usage: (m) => new UsageError(m),
+    usage: helperUsage,
     flag: (name) => p.flags[name],
     flagNames: Object.keys(p.flags),
     positional: p.positional,
@@ -1202,10 +1215,11 @@ export async function run(argv: string[], io: CliIo): Promise<number> {
       requireSite: () => requireSite(p, io),
       site: () => str(p.flags, 'site') ?? io.env.COOKIEMUNCH_SITE,
       readJson: (path: string | undefined) => readConfigFile(io, path),
-      usage: (m: string) => new UsageError(m),
+      usage: helperUsage,
       flag: (name: string) => p.flags[name],
     };
     if (cmd === 'site') return await siteCommand(sub, io, client, helpers, p.positional[2]);
+    if (cmd === 'whoami') { io.stdout(`${JSON.stringify(await client.me(), null, 2)}\n`); return 0; }
     if (cmd === 'health') return await healthCommand(io, client, helpers);
     if (cmd === 'provision') return await provisionCommand(sub, io, client, helpers);
     if (cmd === 'keys') return await keysCommand(sub, io, client, helpers);
@@ -1214,13 +1228,13 @@ export async function run(argv: string[], io: CliIo): Promise<number> {
       return await rightsPageCommand(sub, p, io, client, {
         requireSite: () => requireSite(p, io),
         readJson: (path) => readConfigFile(io, path),
-        usage: (m) => new UsageError(m),
+        usage: helperUsage,
       });
     }
     throw new UsageError(`unknown command: ${cmd}`);
   } catch (e) {
     if (e instanceof UsageError) {
-      io.stderr(`${e.message}\n\n${USAGE}`);
+      io.stderr(e.showUsage ? `${e.message}\n\n${USAGE}` : `${e.message}\n`);
       return 2;
     }
     if (e instanceof CookieMunchApiError) {
