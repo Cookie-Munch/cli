@@ -486,7 +486,7 @@ function proposed(current: Record<string, unknown>, file: Record<string, unknown
 }
 
 /** This package's version, sent in the default User-Agent (a test pins it to package.json). */
-export const CLI_VERSION = '0.27.0';
+export const CLI_VERSION = '0.27.2';
 
 /** `COOKIEMUNCH_USER_AGENT`, else `cookiemunch-cli/<version>`. */
 function userAgent(io: CliIo): string {
@@ -794,7 +794,18 @@ async function executorsCommand(
     // A canary test is a health check: a failing one fails the command, so it can gate a deploy.
     if (canary && operation === 'locate') {
       // CM-18: grade it. The canary must be FOUND; no_match is the failure the canary exists to catch.
-      const found = (r as { matched?: unknown }).matched === true;
+      const matched = (r as { matched?: unknown }).matched;
+      if (matched === null || matched === undefined) {
+        io.stderr('not graded: this connection has no lookup step, so it cannot say whether a person exists\n');
+        return (r as { ok?: unknown }).ok === false ? 1 : 0;
+      }
+      const found = matched === true;
+      // Only cm-standard-v2 must find the canary; the v1 contract asks for no_match (Adviverse #10).
+      const conn = (await rawRequest(io, base, key, 'GET', `/dsar/executors/${encodeURIComponent(id)}`).catch(() => null)) as { profile?: { contract?: string } } | null;
+      if (!found && conn && conn.profile?.contract !== 'cm-standard-v2') {
+        io.stderr('no_match: not graded, only cm-standard-v2 must find the canary (the v1 contract asks for no_match)\n');
+        return (r as { ok?: unknown }).ok === false ? 1 : 0;
+      }
       io.stderr(found ? 'found: conformance pass\n' : 'no_match: conformance FAIL, the canary subject must be reported as found (rule lookup.email.found)\n');
       return found && (r as { ok?: unknown }).ok !== false ? 0 : 1;
     }

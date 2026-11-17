@@ -333,8 +333,13 @@ describe('executors presets / upgrade-preset / test --canary', () => {
     const good = harness({ respond: () => ({ status: 200, body: { ok: true, matched: true } }) });
     expect(await run(['executors', 'test', 'ex_1', '--canary'], good.io)).toBe(0);
     // CM-18: an ok answer that did not find the canary is the failure the canary exists to catch.
-    const noMatch = harness({ respond: () => ({ status: 200, body: { ok: true, matched: false, verdict: 'no record (noMatch)' } }) });
+    const conn = (contract: string) => harness({ respond: (c) => (c.method === 'GET'
+      ? { status: 200, body: { id: 'ex_1', profile: { contract } } }
+      : { status: 200, body: { ok: true, matched: false, verdict: 'no record (noMatch)' } }) });
+    const noMatch = conn('cm-standard-v2');
     expect(await run(['executors', 'test', 'ex_1', '--canary'], noMatch.io)).toBe(1);
+    // Adviverse #10: the v1 contract asks for no_match on the canary, so it is not graded there.
+    expect(await run(['executors', 'test', 'ex_1', '--canary'], conn('cm-standard-v1').io)).toBe(0);
     expect(await run(['executors', 'test', 'ex_1', '--canary', '--email', 'a@b.co'], harness().io)).toBe(2);
   });
 });
