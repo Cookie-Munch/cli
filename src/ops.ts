@@ -527,8 +527,27 @@ export async function bundleCommand(sub: 'plan' | 'apply', io: CliIo, client: Co
   if (b.handOver !== undefined && (!Array.isArray(b.handOver) || b.handOver.some((n) => typeof n !== 'string' || !n))) throw h.usage(`${path}: handOver is a list of cookie names`);
   const handOver = new Set(b.handOver ?? []);
   for (const n of handOver) if ((b.cookies ?? []).some((c) => c.name === n)) throw h.usage(`${path}: handOver ${n}: drop it from cookies too, or the file keeps declaring it`);
-  const cbid = b.site?.cbid ?? h.site();
-  if (!cbid) throw h.usage(`${path} needs site.cbid (or --site)`);
+  let cbid = b.site?.cbid ?? h.site();
+  if (!cbid) {
+    // pdfofile C1: a file with only site.domain: use that domain's site, or (apply) create it and write its cbid into the file.
+    const domain = (b.site as { domain?: unknown } | undefined)?.domain;
+    if (typeof domain !== 'string' || !domain) throw h.usage(`${path} needs site.cbid or site.domain (or --site)`);
+    const bare = (d: string) => d.toLowerCase().replace(/^www\./, '');
+    const existing = (await client.sites.list()).find((s) => bare(s.domain) === bare(domain));
+    if (!existing && sub === 'plan') {
+      if (json(h)) print(io, { site: { create: domain } });
+      else io.stdout(`site: + create site ${domain} (apply creates it and writes its cbid into ${path}; the other parts are planned after that)\n`);
+      return h.flag('exit-code') === true ? 1 : 0;
+    }
+    const site = existing ?? await client.sites.create({ domain });
+    if (sub === 'apply') {
+      const raw = await h.readJson(path); // unprocessed: no secret from the environment is written back
+      raw.site = { ...(raw.site as object), cbid: site.cbid };
+      await io.writeFile(path, `${JSON.stringify(raw, null, 2)}\n`);
+      io.stderr(`${existing ? 'site for' : 'created site for'} ${domain}: ${site.cbid} (written into ${path})\n`);
+    } else io.stderr(`site.cbid is not in ${path}: planning against ${site.cbid}, the site for ${domain} (apply writes it into the file)\n`);
+    cbid = site.cbid;
+  }
   // Secrets never sit in the file, and a variable that is not set fails here, before anything is sent.
   for (const part of ['rightsCaptcha', 'mailProvider'] as const) {
     const v = b[part];
@@ -613,7 +632,10 @@ export async function bundleCommand(sub: 'plan' | 'apply', io: CliIo, client: Co
     // A hand-written row of the same name keeps the preset from declaring it (FormFlow 2026-11-12).
     const fileOwn = new Set((b.cookies ?? []).map((c) => c.name));
     const dupes = ((r as { skipped?: Array<{ name: string; reason: string }> }).skipped ?? []).filter((s) => s.reason.startsWith('you declared it yourself'));
-    const dupeInfo = dupes.filter((s) => !handOver.has(s.name)).map((s) => `${s.name}: your own row, and the ${p.vendor} preset declares it too; yours is kept${fileOwn.has(s.name) ? '. Drop it from cookies' : '. It is not in this file'} and list it in "handOver", and the preset takes it over`);
+    // pdfofile C4: rows the vendor pushed itself are kept as they are: one line, not a warning per row.
+    const vendorOwn = ((r as { skipped?: Array<{ name: string; reason: string }> }).skipped ?? []).filter((s) => s.reason.startsWith('kept: ')).map((s) => s.name);
+    const vendorInfo = vendorOwn.length ? [`${vendorOwn.length} row(s) ${p.vendor} declared on this site itself are kept as they are: ${vendorOwn.slice(0, 8).join(', ')}${vendorOwn.length > 8 ? ', …' : ''}`] : [];
+    const dupeInfo = [...vendorInfo, ...dupes.filter((s) => !handOver.has(s.name)).map((s) => `${s.name}: your own row, and the ${p.vendor} preset declares it too; yours is kept${fileOwn.has(s.name) ? '. Drop it from cookies' : '. It is not in this file'} and list it in "handOver", and the preset takes it over`)];
     // Each plan states the revision in force, so a revision taken up server-side (presets.autoSync, or an earlier apply) is still visible.
     const builtinRev = (r as { revision?: string }).revision;
     const at = up ? `manifest ${up.latest}${up.applied === up.latest ? ', applied' : ''}` : `built-in rows${builtinRev ? ` (${builtinRev})` : ''}`;

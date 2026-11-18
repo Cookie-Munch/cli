@@ -2,6 +2,11 @@
 
 Every published release, newest first. Dates are the day the version was cut.
 
+## 0.27.5 (2026-11-18)
+
+- Added: a file with only `site.domain` plans `+ create site <domain>`; `apply` creates the site (or finds the existing one for that domain), writes its cbid into the file and goes on.
+- Changed: rows a preset's own vendor pushed to the site are summed up in one line and kept, not reported as "your own row" each.
+
 ## 0.27.4 (2026-11-18)
 
 - Changed: a flag a command does not take prints one line and that command's usage, not the whole help; `--file` names the positional path (`plan does not take --file: the file is positional (cookiemunch plan x.json)`).

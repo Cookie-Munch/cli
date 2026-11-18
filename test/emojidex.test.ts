@@ -177,3 +177,37 @@ describe('Upcify CM-U6: a www twin in aliases', () => {
     expect(sent.at(-1)).toEqual({ aliases: ['shop.acme.com'] });
   });
 });
+
+describe('pdfofile C4: rows the vendor declared itself', () => {
+  it('get one summary line, not a "your own row" warning each', async () => {
+    const skipped = ['cf_anon', 'cflx_cred', 'fx_ab'].map((name) => ({ name, reason: "kept: Forumulate's own row on this site (the same provider the preset names)" }));
+    const r = (c: Call) => (c.url.includes('/cookies/presets/forumulate') ? { status: 200, body: { dryRun: true, diff: { added: [], removed: [], changed: [] }, upstream: { applied: 'x', latest: 'x' }, skipped } } : undefined);
+    const h = harness({ respond: r, files: { 'c.json': JSON.stringify({ site: { cbid: 'acme' }, presets: [{ vendor: 'forumulate' }] }) } });
+    expect(await run(['plan', 'c.json'], h.io)).toBe(0);
+    expect(h.out()).toContain('3 row(s) forumulate declared on this site itself are kept as they are: cf_anon, cflx_cred, fx_ab');
+    expect(h.out()).not.toContain('your own row');
+  });
+});
+
+describe('pdfofile C1: a file with only site.domain', () => {
+  const file = JSON.stringify({ site: { domain: 'pdf.example' } });
+  it('plan shows the create and exits 1 under --exit-code; nothing is created', async () => {
+    const h = harness({ files: { 'c.json': file }, respond: (c) => (c.url.endsWith('/v1/sites') && c.method === 'GET' ? { status: 200, body: [] } : undefined) });
+    expect(await run(['plan', 'c.json', '--exit-code'], h.io)).toBe(1);
+    expect(h.out()).toContain('site: + create site pdf.example');
+    expect(h.calls.some((c) => c.method === 'POST')).toBe(false);
+  });
+  it('apply creates the site, writes its cbid into the file, and goes on', async () => {
+    const h = harness({ files: { 'c.json': file }, respond: (c) => (c.url.endsWith('/v1/sites') && c.method === 'GET' ? { status: 200, body: [] } : c.url.endsWith('/v1/sites') && c.method === 'POST' ? { status: 201, body: { cbid: 'new-1', domain: 'pdf.example' } } : c.url.includes('/v1/sites/new-1') ? { status: 200, body: { cbid: 'new-1', domain: 'pdf.example' } } : undefined) });
+    await run(['apply', 'c.json'], h.io);
+    expect(h.calls.find((c) => c.method === 'POST' && c.url.endsWith('/v1/sites'))!.body).toMatchObject({ domain: 'pdf.example' });
+    expect(JSON.parse(h.written['c.json']!)).toEqual({ site: { domain: 'pdf.example', cbid: 'new-1' } });
+    expect(h.err()).toContain('created site for pdf.example: new-1');
+  });
+  it('an existing site for the domain (or its www twin) is used, not duplicated', async () => {
+    const h = harness({ files: { 'c.json': file }, respond: (c) => (c.url.endsWith('/v1/sites') && c.method === 'GET' ? { status: 200, body: [{ cbid: 'old-1', domain: 'www.pdf.example' }] } : c.url.includes('/v1/sites/old-1') ? { status: 200, body: { cbid: 'old-1', domain: 'www.pdf.example' } } : undefined) });
+    await run(['plan', 'c.json'], h.io);
+    expect(h.err()).toContain('planning against old-1');
+    expect(h.calls.some((c) => c.method === 'POST')).toBe(false);
+  });
+});
