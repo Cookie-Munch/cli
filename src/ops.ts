@@ -559,10 +559,20 @@ export async function bundleCommand(sub: 'plan' | 'apply', io: CliIo, client: Co
   };
 
   if (b.site) {
-    const patch = { ...(b.site.domain ? { domain: b.site.domain } : {}), ...(b.site.name !== undefined ? { name: b.site.name } : {}), ...(b.site.aliases ? { aliases: b.site.aliases } : {}) };
+    const patch: { domain?: string; name?: string; aliases?: string[] } = { ...(b.site.domain ? { domain: b.site.domain } : {}), ...(b.site.name !== undefined ? { name: b.site.name } : {}), ...(b.site.aliases ? { aliases: [...b.site.aliases] } : {}) };
     if (Object.keys(patch).length) {
-      const r = await client.sites.update(cbid, patch, { dryRun: true });
-      plans.push({ part: 'site', changes: r.diff.length, detail: r.diff.map((d) => `${d.field}: ${JSON.stringify(d.before)} → ${JSON.stringify(d.after)}`), apply: async () => { await client.sites.update(cbid, patch); return 'site updated'; } });
+      // Upcify CM-U6: the www/apex twin of the domain is always covered; leave it out and say so, rather than fail the plan.
+      const dropped: string[] = [];
+      let r;
+      for (;;) {
+        try { r = await client.sites.update(cbid, patch, { dryRun: true }); break; } catch (e) {
+          const twin = e instanceof CookieMunchApiError && e.code === 'alias_is_domain' ? /(\S+) needs no alias/.exec(e.message)?.[1] : undefined;
+          if (!twin || !patch.aliases?.includes(twin)) throw e;
+          dropped.push(twin);
+          patch.aliases = patch.aliases.filter((a) => a !== twin);
+        }
+      }
+      plans.push({ part: 'site', changes: r.diff.length, detail: r.diff.map((d) => `${d.field}: ${JSON.stringify(d.before)} → ${JSON.stringify(d.after)}`), ...(dropped.length ? { info: dropped.map((d) => `aliases: ${d} left out: the domain's www/apex twin is always covered (remove it from the file)`) } : {}), apply: async () => { await client.sites.update(cbid, patch); return 'site updated'; } });
     } else plans.push({ part: 'site', changes: 0, detail: [] });
   }
   if (b.config) {

@@ -486,7 +486,7 @@ function proposed(current: Record<string, unknown>, file: Record<string, unknown
 }
 
 /** This package's version, sent in the default User-Agent (a test pins it to package.json). */
-export const CLI_VERSION = '0.27.3';
+export const CLI_VERSION = '0.27.4';
 
 /** `COOKIEMUNCH_USER_AGENT`, else `cookiemunch-cli/<version>`. */
 function userAgent(io: CliIo): string {
@@ -1099,7 +1099,12 @@ export async function run(argv: string[], io: CliIo): Promise<number> {
   const [cmd, sub] = p.positional;
   const notTaken = flagNotTaken(p.positional, p.flags) ?? strayWord(p.positional);
   if (notTaken && p.flags.help !== true) {
-    io.stderr(`${notTaken}\n\n${USAGE}`);
+    // Upcify CM-U1: the command's own usage line, not the whole help; --file is a path given in place.
+    const key = sub && USAGE.includes(`  cookiemunch ${cmd} ${sub}`) ? `${cmd} ${sub}` : cmd;
+    const own = USAGE.split('\n').filter((l) => l.startsWith(`  cookiemunch ${key} `) || l === `  cookiemunch ${key}`).map((l) => l.trim());
+    const file = p.flags.file !== undefined && own.some((l) => /\[?[\w.-]*\.json\]?|<file>/.test(l));
+    if (own.length) io.stderr(`${notTaken}${file ? `: the file is positional (cookiemunch ${key} ${typeof p.flags.file === 'string' ? p.flags.file : '<file>'})` : ''}\nusage: ${own.slice(0, 2).join('\n       ')}\n`);
+    else io.stderr(`${notTaken}\n\n${USAGE}`);
     return 2;
   }
   // `version [--json]` needs no key either.

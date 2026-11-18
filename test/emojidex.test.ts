@@ -147,3 +147,33 @@ describe('a rightsIdentity key set not live yet (CM-2)', () => {
     expect(writes(h.calls)).toHaveLength(0);
   });
 });
+
+describe('Upcify CM-U1: a flag a command does not take', () => {
+  it('names the positional file, prints the command usage only', async () => {
+    const h = harness({});
+    expect(await run(['plan', '--file', 'x.json'], h.io)).toBe(2);
+    const lines = h.err().trim().split('\n');
+    expect(lines.length).toBeLessThanOrEqual(2);
+    expect(lines[0]).toBe('plan does not take --file: the file is positional (cookiemunch plan x.json)');
+    expect(lines[1]).toMatch(/^usage: cookiemunch plan /);
+  });
+});
+
+describe('Upcify CM-U6: a www twin in aliases', () => {
+  it('is left out of the plan with a note, not a failed plan', async () => {
+    const sent: unknown[] = [];
+    const r = (c: Call) => {
+      if (c.url.includes('/v1/sites/acme') && c.method === 'PATCH') {
+        sent.push(c.body);
+        const aliases = (c.body as { aliases?: string[] }).aliases ?? [];
+        if (aliases.includes('www.acme.com')) return { status: 400, body: { error: 'www.acme.com needs no alias: the site\'s domain and its www/apex twin are always covered. Remove it from aliases.', code: 'alias_is_domain', field: 'aliases' } };
+        return { status: 200, body: { dryRun: true, diff: [] } };
+      }
+      return undefined;
+    };
+    const h = harness({ respond: r, files: { 'c.json': JSON.stringify({ site: { cbid: 'acme', aliases: ['www.acme.com', 'shop.acme.com'] } }) } });
+    expect(await run(['plan', 'c.json'], h.io)).toBe(0);
+    expect(h.out()).toContain('aliases: www.acme.com left out');
+    expect(sent.at(-1)).toEqual({ aliases: ['shop.acme.com'] });
+  });
+});

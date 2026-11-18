@@ -2,6 +2,38 @@
 
 Every published release, newest first. Dates are the day the version was cut.
 
+## 0.27.4 (2026-11-18)
+
+- Changed: a flag a command does not take prints one line and that command's usage, not the whole help; `--file` names the positional path (`plan does not take --file: the file is positional (cookiemunch plan x.json)`).
+- Changed: `plan`/`apply` leave the domain's www/apex twin out of `site.aliases` with a note, instead of failing on `alias_is_domain`.
+
+## 0.27.3 (2026-11-18)
+
+- Fixed: `executors push` (and the executors part of `plan`/`apply`) compares a file's `params` with the connection's `presetParams`, and `mintFrom`/`externalId` with its `mint`, so pushing the same file twice changes nothing. Before, every push reported changes.
+- Added: `mintFrom` on a connection that holds a pasted key is a change: the push sends `PATCH {mintFrom, externalId}`, and the partner mints a key that replaces it. `executors pull` writes `mintFrom`/`externalId` for minted connections.
+- Needs the API from 2026-11-17 or later.
+
+## 0.27.2 (2026-11-17)
+
+- Fixed: `executors test --canary` grades by contract: only a cm-standard-v2 connection must find the canary; a v1 or vendor connection answering `no_match` passes (exit 0).
+
+## 0.27.1 (2026-11-16)
+
+- Fixed: `--canary` does not grade a connection whose profile has no lookup step.
+
+## 0.27.0 (2026-11-16)
+
+- Added: `partners update <id> --site <cbid> [--external-id …] [--label …] [--dry-run]` edits a link in place; the grant stays.
+- Added: `executors test --canary` exits 1 when a connection that must find the canary does not.
+- Changed: `partners link` names the account id the partner needs (its `externalIdLabel`).
+
+## 0.26.0 (2026-11-16)
+
+- Added: `cookiemunch whoami`.
+- Added: an executors entry with `mintFrom` is created with no key; each entry may name its own `secretEnv` (`--secret-env` is the fallback), and every variable is checked before anything is sent.
+- Added: `_` and `x-` keys are comments at the top of a file, of each part and of each executors/webhooks entry; `${env:NAME}` is expanded in strings, and an unset one fails first.
+- Changed: a refusal prints one line; the usage block is kept for wrong invocations. A rights identity whose key set is not reachable yet is pending, and the run exits 3.
+
 ## 0.25.0 (2026-11-16)
 
 - Fixed: `plan` and `apply` give the same answer on `handOver`. Both send the file's cookies part and presets to the server as one run, and the server judges the hand-over on the outcome, so a row that is already handed over passes (a retry no longer fails with "no preset in this file declares them").
