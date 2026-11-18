@@ -474,6 +474,9 @@ export async function sandboxCommand(sub: string | undefined, io: CliIo, client:
 
 // ---- plan | apply <cookiemunch.json> (CMU-D12) ----
 
+/** Editors autocomplete cookiemunch.json from this; the server builds it from the OpenAPI document. */
+export const CONFIG_SCHEMA_URL = 'https://cookiemunch.net/schemas/cookiemunch-v1.json';
+
 interface Bundle {
   site?: { cbid?: string; domain?: string; name?: string; aliases?: string[] };
   config?: Record<string, unknown>;
@@ -1072,7 +1075,7 @@ export async function initCommand(io: CliIo, client: CookieMunchClient, h: OpsHe
   }
   if (existing) io.stderr(`${domain} is already site ${existing.cbid}: using it.\n`);
   const cbid = given ?? existing?.cbid ?? (dry ? '<new site>' : (await client.sites.create({ domain: domain! } as never)).cbid);
-  const file = `${JSON.stringify({ site: { cbid }, presets: [], cookies: [], executors: [] }, null, 2)}\n`;
+  const file = `${JSON.stringify({ $schema: CONFIG_SCHEMA_URL, site: { cbid }, presets: [], cookies: [], executors: [] }, null, 2)}\n`;
   if (onDisk !== null) io.stderr(`${out} already exists: left as it is.\n`);
   else if (dry) io.stderr(`Would write ${out}.\n`);
   else {

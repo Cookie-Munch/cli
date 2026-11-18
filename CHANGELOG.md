@@ -2,6 +2,10 @@
 
 Every published release, newest first. Dates are the day the version was cut.
 
+## 0.27.6 (2026-11-18)
+
+- Added: `init` writes `"$schema": "https://cookiemunch.net/schemas/cookiemunch-v1.json"`, so editors autocomplete and check the file.
+
 ## 0.27.5 (2026-11-18)
 
 - Added: a file with only `site.domain` plans `+ create site <domain>`; `apply` creates the site (or finds the existing one for that domain), writes its cbid into the file and goes on.
