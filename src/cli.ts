@@ -240,7 +240,7 @@ Usage:
       Grant a partner platform the site's consent events (no secret is created), list
       the grants, fix a grant's account id or label in place (the grant and any executor
       key stay; a key minted for the old account is named to re-mint), or revoke one.
-      Any partner this deployment knows (forumulate, atlas, chatly, referalli, hermetica,
+      Any partner this deployment knows (forumulate, atlas, chatly, referalli, hermetica, lucida,
       or one registered for it); "partners list" shows each one's externalIdLabel, the
       account id --external-id takes, and the requiredScopes of the key.
   cookiemunch token exchange --subject-token-env NAME --scope <a,b> --resource org:<id>|site:<cbid> [--expires-in <s>]
@@ -486,7 +486,7 @@ function proposed(current: Record<string, unknown>, file: Record<string, unknown
 }
 
 /** This package's version, sent in the default User-Agent (a test pins it to package.json). */
-export const CLI_VERSION = '0.27.2';
+export const CLI_VERSION = '0.27.3';
 
 /** `COOKIEMUNCH_USER_AGENT`, else `cookiemunch-cli/<version>`. */
 function userAgent(io: CliIo): string {

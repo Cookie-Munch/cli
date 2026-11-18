@@ -3,7 +3,7 @@ import { describe, it, expect } from 'vitest';
 import { run, USAGE } from '../src/cli.js';
 import { harness, type Call } from './harness.js';
 
-const live = [{ id: 'ex1', system: 'forumulate', preset: 'forumulate', cbid: 'acme', auto: true }];
+const live = [{ id: 'ex1', system: 'forumulate', preset: 'forumulate', cbid: 'acme', auto: true, mint: { partner: 'forumulate' } }];
 const respond = (c: Call) => (c.url.endsWith('/v1/dsar/executors') && c.method === 'GET' ? { status: 200, body: live } : c.method === 'POST' ? { status: 201, body: { id: 'exN' } } : c.method === 'PATCH' ? { status: 200, body: live[0] } : undefined);
 const posts = (calls: Call[]) => calls.filter((c) => c.method === 'POST' && c.url.endsWith('/v1/dsar/executors')).map((c) => c.body as Record<string, unknown>);
 const writes = (calls: Call[]) => calls.filter((c) => c.method !== 'GET' && !c.url.includes('dryRun'));
@@ -45,6 +45,25 @@ describe('executors push (CM-1, CM-5)', () => {
     const p = harness({ respond, files: { 'c.json': JSON.stringify({ site: { cbid: 'acme' }, executors: JSON.parse(file).executors }) } });
     expect(await run(['plan', 'c.json', '--exit-code'], p.io)).toBe(0);
     expect(p.out()).toContain('executors: No changes');
+  });
+
+  it('CM-21: a file saying params matches the presetParams the API serves; a second push changes nothing', async () => {
+    const lucida = [{ id: 'ex2', system: 'lucida', preset: 'lucida', cbid: 'acme', auto: true, presetParams: { projectId: 'p1', baseUrl: 'https://lucidace.com' }, mint: { partner: 'lucida', externalId: 'p1' } }];
+    const r = (c: Call) => (c.url.endsWith('/v1/dsar/executors') && c.method === 'GET' ? { status: 200, body: lucida } : undefined);
+    const file = JSON.stringify({ executors: [{ system: 'lucida', preset: 'lucida', params: { projectId: 'p1' }, mintFrom: 'lucida', externalId: 'p1', cbid: 'acme', auto: true }] });
+    const h = harness({ respond: r, files: { 'e.json': file } });
+    expect(await run(['executors', 'push', 'e.json'], h.io)).toBe(0);
+    expect(h.err()).toContain('No changes');
+    expect(writes(h.calls)).toHaveLength(0);
+  });
+
+  it('CM-20: mintFrom on a connection holding a pasted key is a change, sent as a PATCH with its account', async () => {
+    const pasted = [{ id: 'ex3', system: 'lucida', preset: 'lucida', cbid: 'acme', auto: true, presetParams: { projectId: 'p1' } }];
+    const r = (c: Call) => (c.url.endsWith('/v1/dsar/executors') && c.method === 'GET' ? { status: 200, body: pasted } : c.method === 'PATCH' ? { status: 200, body: pasted[0] } : undefined);
+    const file = JSON.stringify({ executors: [{ system: 'lucida', preset: 'lucida', params: { projectId: 'p1' }, mintFrom: 'lucida', externalId: 'p1', cbid: 'acme', auto: true }] });
+    const h = harness({ respond: r, files: { 'e.json': file } });
+    expect(await run(['executors', 'push', 'e.json'], h.io)).toBe(0);
+    expect(writes(h.calls).map((c) => [c.method, c.body])).toEqual([['PATCH', { mintFrom: 'lucida', externalId: 'p1' }]]);
   });
 
   it('apply checks an executor key before writing any other part', async () => {

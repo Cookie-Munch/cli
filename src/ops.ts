@@ -99,6 +99,9 @@ function executorFileView(e: DsarExecutor): Record<string, Json> {
     const v = (e as unknown as Record<string, unknown>)[k];
     if (v !== undefined) out[k] = v as Json;
   }
+  // CM-20: a minted key reads back as the file says it: mintFrom, and the account it was minted for.
+  const mint = (e as unknown as { mint?: { partner: string; externalId?: string } }).mint;
+  if (mint) { out.mintFrom = mint.partner; if (mint.externalId) out.externalId = mint.externalId; }
   return out;
 }
 
@@ -139,10 +142,24 @@ function expandEnv<T>(v: T, env: Record<string, string | undefined>, fail: (msg:
  * What an entry is diffed on. `secretEnv` (CM-5) is never sent, and `mintFrom` (CM-1) only says how a NEW
  * connection gets its key: the live view does not echo it, so diffing it would be a change forever.
  */
-function executorWant(w: Record<string, Json>, live: boolean): Record<string, Json> {
+function executorWant(w: Record<string, Json>): Record<string, Json> {
   const { id: _i, state: _s, secretEnv: _e, ...want } = w;
-  if (live) delete want.mintFrom;
+  // The server stores params as strings: `true` in the file and "true" live are the same.
+  if (plain(want.params)) want.params = Object.fromEntries(Object.entries(want.params).map(([k, v]) => [k, typeof v === 'string' ? v : JSON.stringify(v)]));
   return want;
+}
+
+/**
+ * The live connection in the file's words (CM-21): the API serves `presetParams` and `mint`, a file says
+ * `params`, `mintFrom` and `externalId`. Only the params the file names are compared (they cannot change anyway).
+ */
+function executorHave(have: Record<string, Json>, want: Record<string, Json>): Record<string, Json> {
+  const out: Record<string, Json> = { ...have };
+  const live = plain(have.presetParams) ? have.presetParams : {};
+  if (plain(want.params)) out.params = Object.fromEntries(Object.keys(want.params).map((k) => [k, (live as Record<string, Json>)[k] ?? null]));
+  // A key minted before mints recorded the account names none: nothing to compare against.
+  if (have.mintFrom !== undefined && have.externalId === undefined && want.externalId !== undefined) out.externalId = want.externalId;
+  return out;
 }
 
 /** Why each connection to create has no key yet: none needed with mintFrom, else its secretEnv or --secret-env must be set. */
@@ -181,9 +198,12 @@ export async function executorsFileCommand(sub: 'pull' | 'diff' | 'push', io: Cl
   for (const w of wanted) {
     const match = current.find((c) => (w.id && c.id === w.id) || (!w.id && c.system === w.system));
     // `state` says how a new connection starts; it is not something to diff against a live one.
-    if (!match) { plan.push({ system: String(w.system), action: 'create', changes: diffJson({}, executorWant(w, false) as Json) }); continue; }
-    const want = executorWant(w, true);
-    const { id, ...have } = match;
+    if (!match) { plan.push({ system: String(w.system), action: 'create', changes: diffJson({}, executorWant(w) as Json) }); continue; }
+    const want = executorWant(w);
+    const { id, ...live } = match;
+    const have = executorHave(live, want);
+    // externalId moves with mintFrom: alone it is no change (the account is fixed once minted).
+    if (want.mintFrom === undefined) delete want.externalId;
     const changes = diffJson(Object.fromEntries(Object.keys(want).map((k) => [k, have[k] ?? null])) as Json, want as Json);
     plan.push({ system: String(w.system), action: changes.length ? 'update' : 'unchanged', id: String(id), changes });
   }
@@ -201,7 +221,10 @@ export async function executorsFileCommand(sub: 'pull' | 'diff' | 'push', io: Cl
     const w = entry(p);
     const { id: _i, secretEnv: own, ...body } = w;
     if (p.action === 'update') {
-      await client.fulfillment.updateExecutor(p.id!, Object.fromEntries(p.changes.map((c) => c.path.split(/[.[]/)[0]!).filter((k, i, a) => a.indexOf(k) === i).map((k) => [k, body[k]])) as never);
+      const keys = p.changes.map((c) => c.path.split(/[.[]/)[0]!).filter((k, i, a) => a.indexOf(k) === i);
+      // CM-20: a pasted key becomes a minted one; the account it is minted for goes with it.
+      if (keys.includes('mintFrom') && body.externalId !== undefined && !keys.includes('externalId')) keys.push('externalId');
+      await client.fulfillment.updateExecutor(p.id!, Object.fromEntries(keys.map((k) => [k, body[k]])) as never);
     } else {
       // A minted connection never carries a key: the server refuses secretKey with mintFrom.
       const secretKey = body.mintFrom !== undefined ? undefined : io.env[(own as string | undefined) ?? secretEnv!];
@@ -675,8 +698,10 @@ export async function bundleCommand(sub: 'plan' | 'apply', io: CliIo, client: Co
     for (const w of b.executors) {
       for (const k of ['secretKey', 'secret', 'webhookSecret']) if (k in w) throw h.usage(`${path}: executors carry no secrets (${k}); name a variable with "secretEnv": "NAME" (or pass --secret-env)`);
       const m = current.find((c) => c.system === w.system);
-      const want = executorWant(w, !!m);
-      const changes = m ? diffJson(Object.fromEntries(Object.keys(want).map((k) => [k, m[k] ?? null])) as Json, want as Json) : diffJson({}, want as Json);
+      const want = executorWant(w);
+      if (m && want.mintFrom === undefined) delete want.externalId;
+      const have = m ? executorHave(m, want) : null;
+      const changes = have ? diffJson(Object.fromEntries(Object.keys(want).map((k) => [k, have[k] ?? null])) as Json, want as Json) : diffJson({}, want as Json);
       if (changes.length) { n++; detail.push(`${m ? 'update' : 'create'} ${String(w.system)}`); rows.push(`${String(w.system)}: ${formatChanges(changes)}`); }
       const e = live.find((x) => x.system === w.system) as unknown as { id: string; preset?: string; presetVersion?: number; presetLatestVersion?: number; presetPinned?: boolean } | undefined;
       if (e?.preset) presets.push({ system: w.system, preset: e.preset, ...(e.presetVersion !== undefined ? { presetVersion: e.presetVersion } : {}), ...(e.presetLatestVersion !== undefined ? { latestVersion: e.presetLatestVersion } : {}), pinned: e.presetPinned === true });

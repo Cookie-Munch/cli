@@ -135,7 +135,7 @@ export async function partnersCommand(sub: string | undefined, rest: string[], i
   if (sub === 'link') {
     const partner = h.flag('partner');
     const externalId = h.flag('external-id');
-    if (typeof partner !== 'string' || !/^[a-z][a-z0-9_]{1,39}$/.test(partner)) throw h.usage('--partner <id> is required: any partner `cookiemunch partners list` shows (forumulate, atlas, chatly, referalli, hermetica, or one registered on the deployment)');
+    if (typeof partner !== 'string' || !/^[a-z][a-z0-9_]{1,39}$/.test(partner)) throw h.usage('--partner <id> is required: any partner `cookiemunch partners list` shows (forumulate, atlas, chatly, referalli, hermetica, lucida, or one registered on the deployment)');
     if (typeof externalId !== 'string') {
       // CM-16: name the id this partner needs (the catalogue knows it), not a generic flag error.
       const cat = ((await client.sites.listPartners(cbid).catch(() => null)) as { partners?: Array<{ id: string; externalIdLabel?: string; externalIdPrefix?: string }> } | null)?.partners ?? [];
