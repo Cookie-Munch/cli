@@ -510,6 +510,15 @@ type Part = (typeof PARTS)[number];
 const fieldLines = (cur: Record<string, unknown>, want: Record<string, unknown>) =>
   diffJson(Object.fromEntries(Object.keys(want).map((k) => [k, cur[k] ?? null])), want).map((c) => formatChanges([c]));
 
+/** The suite and custom category ids the file's config switches on (what the site will know once config applies). */
+export function plannedCategories(config: unknown): Set<string> {
+  const cats = (config as { categories?: { suite?: unknown; custom?: unknown } } | undefined)?.categories;
+  const out = new Set<string>();
+  if (Array.isArray(cats?.suite)) for (const id of cats.suite) if (typeof id === 'string') out.add(id);
+  if (Array.isArray(cats?.custom)) for (const c of cats.custom as Array<{ id?: unknown }>) if (typeof c?.id === 'string') out.add(c.id);
+  return out;
+}
+
 /** A list part names its items on its line when it has more than one. */
 const items = (names: string[]) => (names.length > 1 ? names.join(', ') : undefined);
 
@@ -606,16 +615,30 @@ export async function bundleCommand(sub: 'plan' | 'apply', io: CliIo, client: Co
   if (b.cookies) {
     const replace = b.replaceCookies === true;
     // Always planned as a replace, so rows the file leaves out are named even when they are kept.
-    const r = await client.sites.declareCookies(cbid, b.cookies as never, { dryRun: true, replace: true });
+    // LinkHub CM-L1: a category this file's config adds is unknown to the site until config applies. Those rows are
+    // checked against the planned config here and by the server right after the config part, in the same run.
+    const planned = plannedCategories(b.config);
+    const later = (b.cookies as Array<{ category?: unknown }>).filter((c) => typeof c.category === 'string' && planned.has(c.category));
+    const r = await client.sites.declareCookies(cbid, b.cookies as never, { dryRun: true, replace: true }).catch(async (e: unknown) => {
+      const cat = e instanceof CookieMunchApiError ? /unknown category "([^"]+)"/.exec(e.message)?.[1] : undefined;
+      if (!cat || !planned.has(cat)) throw e;
+      // Plan the rest against the stored config, so the diff still names every other row.
+      const rest = (b.cookies as Array<{ category?: unknown }>).filter((c) => !later.includes(c));
+      const out = await client.sites.declareCookies(cbid, rest as never, { dryRun: true, replace: true });
+      return { ...out, deferred: later.map((c) => String((c as { name?: unknown }).name)) };
+    });
+    const deferred = (r as { deferred?: string[] }).deferred ?? [];
     const d = r.diff ?? { added: [], removed: [], changed: [] };
     const removed = replace ? d.removed : d.removed.filter((c) => handOver.has(c.name));
     const kept = replace ? [] : d.removed.filter((c) => !handOver.has(c.name));
-    const info = kept.length
-      ? [`kept: ${kept.map((c) => c.name).join(', ')}: your own declaration(s) the file leaves out stay (list one in "handOver" to give it to its preset, or set "replaceCookies": true to remove them all; preset rows always stay)`]
-      : [];
+    const keptNames = kept.map((c) => c.name).filter((n) => !deferred.includes(n));
+    const info = [
+      ...(keptNames.length ? [`kept: ${keptNames.join(', ')}: your own declaration(s) the file leaves out stay (list one in "handOver" to give it to its preset, or set "replaceCookies": true to remove them all; preset rows always stay)`] : []),
+      ...(deferred.length ? [`${deferred.join(', ')}: in a category this file's config adds; checked by the server right after the config part`] : []),
+    ];
     plans.push({
-      part: 'cookies', changes: d.added.length + removed.length + d.changed.length,
-      detail: [...d.added.map((c) => `+ ${c.name}`), ...removed.map((c) => `- ${c.name}${handOver.has(c.name) ? ' (handed over to its preset)' : ''}`), ...d.changed.map((c) => `~ ${c.name}`)], info,
+      part: 'cookies', changes: d.added.length + removed.length + d.changed.length + deferred.length,
+      detail: [...deferred.map((n) => `+ ${n} (after config)`), ...d.added.map((c) => `+ ${c.name}`), ...removed.map((c) => `- ${c.name}${handOver.has(c.name) ? ' (handed over to its preset)' : ''}`), ...d.changed.map((c) => `~ ${c.name}`)], info,
       apply: () => runDeclarations(),
     });
   }

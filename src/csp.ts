@@ -23,6 +23,8 @@ export const KNOWN_MANIFEST_HOSTS: Readonly<Record<string, readonly string[]>> =
   referalli: ['referalli.com'],
   hermetica: ['hermeticor.com'],
   watchtower: ['watchtowerops.net'],
+  lucida: ['lucidace.com'],
+  seolyticize: ['seolyticize.com'],
 };
 
 /** Old names still accepted. */
@@ -72,7 +74,7 @@ const ORIGIN = /^(https|wss):\/\/[^\s*'"]+$/;
 const KEYWORD = /^('unsafe-inline'|'unsafe-eval'|'wasm-unsafe-eval'|'unsafe-hashes'|data:|blob:|'sha(256|384|512)-[A-Za-z0-9+/_-]+={0,2}')$/;
 
 /** The union of every surface's origins and requirements, by directive; `'self'` first. */
-export function mergeManifests(manifests: Manifest[]): Map<string, string[]> {
+export function mergeManifests(manifests: Manifest[], opts: { hashes?: boolean } = {}): Map<string, string[]> {
   const byDirective = new Map<string, Set<string>>();
   const add = (directive: string, list: unknown, allowKeywords: boolean) => {
     if (!Array.isArray(list) || !/^[a-z-]+-src$|^form-action$/.test(directive)) return;
@@ -82,6 +84,8 @@ export function mergeManifests(manifests: Manifest[]): Map<string, string[]> {
       if (typeof src !== 'string') continue;
       // A placeholder (`https://{instance}.example.com`) is a tenant's value: it cannot be pasted.
       if (src.includes('{')) continue;
+      // Any hash in script-src switches 'unsafe-inline' off, which breaks a nonce-less static Next.js page (LinkHub CM-X1).
+      if (opts.hashes === false && /^'sha(256|384|512)-/.test(src)) continue;
       if (ORIGIN.test(src) || (allowKeywords && KEYWORD.test(src))) set.add(src);
     }
   };
@@ -176,11 +180,11 @@ export interface CspIo {
 }
 
 export async function cspCommand(
-  opts: { merge?: string; framework?: string; site?: string; apiBase: string },
+  opts: { merge?: string; framework?: string; site?: string; apiBase: string; hashes?: boolean },
   io: CspIo,
   usage: (message: string) => Error,
 ): Promise<number> {
-  if (!opts.merge) throw usage('--merge is required: vendor names (cookiemunch, atlas, chatly, forumulate, referalli, hermetica, watchtower) or manifest URLs, comma-separated');
+  if (!opts.merge) throw usage(`--merge is required: vendor names (${Object.keys(KNOWN_MANIFEST_HOSTS).join(', ')}) or manifest URLs, comma-separated`);
   if (opts.framework !== undefined && !(CSP_FRAMEWORKS as readonly string[]).includes(opts.framework)) {
     throw usage(`--framework must be one of ${CSP_FRAMEWORKS.join(', ')}`);
   }
@@ -193,11 +197,14 @@ export async function cspCommand(
     if (r.ok) manifests.push(r.manifest);
     else {
       failed++;
-      io.stderr(`${src.label}: no manifest — ${r.error}\n`);
+      io.stderr(`${src.label}: no manifest — ${r.error}. It contributes NOTHING to the policy below: add its origins by hand, or serve it through a same-origin path\n`);
     }
   }
   if (manifests.length === 0) return 1;
-  const policy = mergeManifests(manifests);
+  const policy = mergeManifests(manifests, { hashes: opts.hashes !== false });
+  if (opts.hashes !== false && [...policy.values()].flat().some((v) => v.startsWith("'sha"))) {
+    io.stderr("Note: the policy carries script hashes, which switch 'unsafe-inline' off. A page with its own inline scripts and no nonce (a static Next.js build) needs --no-hashes.\n");
+  }
   io.stdout(`${renderPolicy(policy, opts.framework as CspFramework | undefined)}\n`);
   const left = placeholders(manifests);
   if (left.length) io.stderr(`Tenant-specific sources left out (fill in your own value): ${left.join(', ')}\n`);

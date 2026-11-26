@@ -28,7 +28,7 @@
  *   cookiemunch provision    <file> [--dry-run]
  *   cookiemunch partners     list|link|update|unlink --site <cbid> …
  *   cookiemunch consent-sync status|rotate|remove|token --site <cbid> …
- *   cookiemunch csp          --merge <vendors|urls> [--framework next|express|nginx] [--site <cbid>]
+ *   cookiemunch csp          --merge <vendors|urls> [--framework next|express|nginx] [--site <cbid>] [--no-hashes]
  *
  * Everything goes through the typed SDK (@cookiemunch/sdk) except where the SDK has no
  * method yet; those calls go through `rawRequest` with the same key and base URL. All I/O
@@ -246,10 +246,11 @@ Usage:
   cookiemunch token exchange --subject-token-env NAME --scope <a,b> --resource org:<id>|site:<cbid> [--expires-in <s>]
       Swap your identity provider's token (read from the variable NAME) for a short-lived, scoped
       API key (at most 1 hour); prints the key alone. Needs no API key.
-  cookiemunch csp --merge <vendors|urls> [--framework next|express|nginx] [--site <cbid>]
+  cookiemunch csp --merge <vendors|urls> [--framework next|express|nginx] [--site <cbid>] [--no-hashes]
       One Content-Security-Policy from several products' embed manifests
       (/.well-known/<product>-embed.json): cookiemunch, atlas, chatly, forumulate,
-      referalli, hermetica, watchtower, or any manifest URL. --framework prints it for next.config.js,
+      referalli, hermetica, watchtower, lucida, seolyticize, or any manifest URL. --no-hashes leaves
+      out script hashes, which would switch 'unsafe-inline' off (use it for a static Next.js build). --framework prints it for next.config.js,
       Express or nginx; without it, the header value. --site uses your site's own
       Cookie Munch manifest (its logo, fonts, sync endpoint). Needs no API key. Exits 1
       when a named product has not published a manifest (the rest are still merged).
@@ -300,7 +301,7 @@ Usage:
   cookiemunch executors activate <id>
       A connection registered before its API was live (state "pending"): runs conformance, then activates.
   cookiemunch plan [cookiemunch.json] [--site <cbid>] [--detail] [--exit-code] [--json]
-  cookiemunch apply [cookiemunch.json] [--site <cbid>] [--presets-only] [--secret-env NAME] [--secrets-out <file>]
+  cookiemunch apply [cookiemunch.json] [--site <cbid>] [--presets-only] [--secret-env NAME] [--secrets-out <file>] [--yes]
       One file for a site: {site, config, cookies, presets, rightsPage, rightsIdentity,
       rightsCaptcha, dsar, mailProvider, executors, webhooks, partners}, no secrets. plan prints
       the server's dry run (or a read-back diff) of every part ("No changes" when it matches),
@@ -312,6 +313,8 @@ Usage:
       Keys starting _ or x- at the top of the file, a part or an entry are comments; "\${env:NAME}" in a string is that variable.
       A rightsIdentity whose key set is not reachable yet (the site is not deployed) is pending:
       every other part is planned and applied, and the run exits 3. Re-run apply after the deploy.
+      Cookie rows are checked against the file's own config, so a category the same file adds plans
+      and applies in one run. apply never asks; --yes (or -y) is accepted and changes nothing.
   cookiemunch scan-source [dir] [--json]
       The first-party cookie and storage names your code sets (document.cookie, cookies.set,
       cookies().set, localStorage/sessionStorage.setItem in .js/.ts/.jsx/.tsx/.vue/.svelte/.html;
@@ -359,7 +362,7 @@ interface Parsed {
   flags: Record<string, string | true>;
 }
 
-export const BOOLEAN_FLAGS = new Set(['keep-old-domain', 'replace', 'exit-code', 'open', 'help', 'json', 'yes', 'strict', 'wait', 'canary', 'dry-run', 'clear-name', 'revoke-atlas-id-grant', 'with-cbid', 'without-cbid', 'cleanup', 'verify', 'detail', 'presets-only', 'defer', 'fix-plan', 'no-verify']);
+export const BOOLEAN_FLAGS = new Set(['keep-old-domain', 'replace', 'exit-code', 'open', 'help', 'json', 'yes', 'strict', 'wait', 'canary', 'dry-run', 'clear-name', 'revoke-atlas-id-grant', 'with-cbid', 'without-cbid', 'cleanup', 'verify', 'detail', 'presets-only', 'defer', 'fix-plan', 'no-verify', 'no-hashes']);
 
 /** Every flag the help names. An unknown flag that is ignored is a setting someone believes they made. */
 const KNOWN_FLAGS = new Set([...USAGE.matchAll(/--([a-z][a-z-]*)/g)].map((m) => m[1]!));
@@ -419,6 +422,8 @@ export function parseArgs(argv: string[]): Parsed {
     const a = argv[i]!;
     if (a === '-h') {
       flags.help = true;
+    } else if (a === '-y') {
+      flags.yes = true;
     } else if (a.startsWith('--')) {
       const eq = a.indexOf('=');
       const name = eq > 0 ? a.slice(2, eq) : a.slice(2);
@@ -486,7 +491,7 @@ function proposed(current: Record<string, unknown>, file: Record<string, unknown
 }
 
 /** This package's version, sent in the default User-Agent (a test pins it to package.json). */
-export const CLI_VERSION = '0.27.6';
+export const CLI_VERSION = '0.28.0';
 
 /** `COOKIEMUNCH_USER_AGENT`, else `cookiemunch-cli/<version>`. */
 function userAgent(io: CliIo): string {
@@ -1172,7 +1177,7 @@ export async function run(argv: string[], io: CliIo): Promise<number> {
       const framework = str(p.flags, 'framework');
       const site = str(p.flags, 'site') ?? io.env.COOKIEMUNCH_SITE;
       return await cspCommand(
-        { apiBase: base, ...(merge ? { merge } : {}), ...(framework ? { framework } : {}), ...(site ? { site } : {}) },
+        { apiBase: base, ...(merge ? { merge } : {}), ...(framework ? { framework } : {}), ...(site ? { site } : {}), ...(p.flags['no-hashes'] === true ? { hashes: false } : {}) },
         io,
         (m) => new UsageError(m),
       );
