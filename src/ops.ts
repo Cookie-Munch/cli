@@ -319,7 +319,8 @@ export async function doctorCommand(io: CliIo, client: CookieMunchClient, h: Ops
   try {
     const self = await client.keys.self();
     const left = typeof self.expiresAt === 'number' ? Math.floor((self.expiresAt - Date.now()) / 86_400_000) : null;
-    checks.push({ check: 'key expiry', ok: left === null ? null : left > 7, detail: left === null ? 'no expiry: give automation keys one' : `expires in ${left} day(s)` });
+    // Sellstream CM-I2: 30 days, the first mail's threshold; a roll keeps the expiry, so the fix is an extension or a replacement.
+    checks.push({ check: 'key expiry', ok: left === null ? null : left > 30, detail: left === null ? 'no expiry: give automation keys one' : `expires in ${left} day(s)${left > 30 ? '' : `: extend it (PATCH /v1/keys/${self.prefix} {"expiresAt": …} with an unscoped key) or mint a replacement; rolling keeps the expiry`}` });
   } catch {
     checks.push({ check: 'key expiry', ok: null, detail: 'this server cannot read the key itself (GET /v1/keys/self)' });
   }
@@ -610,7 +611,8 @@ export async function bundleCommand(sub: 'plan' | 'apply', io: CliIo, client: Co
     const r = await client.sites.dryRunConfig(cbid, b.config as never, { mode: 'patch' });
     const diff = r.diff ?? [];
     const dropped = r.config ? notKept(b.config as Record<string, unknown>, r.config) : [];
-    plans.push({ part: 'config', changes: diff.length, detail: diff.map((d) => `${d.path}: ${JSON.stringify(d.from)} → ${JSON.stringify(d.to)}`), ...(dropped.length ? { notApplied: dropped } : {}), apply: async () => { await client.sites.patchConfig(cbid, b.config as never); return 'config patched'; } });
+    const fresh = r.storedConfig === false ? [`site has default config: ${diff.length ? 'the last apply may have stopped early, or this is its first' : 'nothing saved yet'}`] : [];
+    plans.push({ part: 'config', changes: diff.length, detail: diff.map((d) => `${d.path}: ${JSON.stringify(d.from)} → ${JSON.stringify(d.to)}`), ...(dropped.length ? { notApplied: dropped } : {}), ...(fresh.length ? { info: fresh } : {}), apply: async () => { await client.sites.patchConfig(cbid, b.config as never); return 'config patched'; } });
   }
   if (b.cookies) {
     const replace = b.replaceCookies === true;
@@ -768,6 +770,11 @@ export async function bundleCommand(sub: 'plan' | 'apply', io: CliIo, client: Co
           ? `preset ${e.preset}: pinned at v${e.presetVersion} (presetPinned), not following v${e.presetLatestVersion}`
           : `preset ${e.preset}: v${e.presetVersion} -> v${e.presetLatestVersion} available (cookiemunch executors upgrade-preset ${e.id})`);
       }
+    }
+    // CM-X2: a connection the file leaves out (one `executors connect` made) is managed there, never removed.
+    for (const c of current) {
+      if (b.executors.some((w) => w.system === c.system) || (c.cbid && c.cbid !== cbid)) continue;
+      info.push(`= ${String(c.system)}: managed${c.mintFrom ? ` by ${String(c.mintFrom)} connect` : ' outside this file'}; left as it is (cookiemunch executors pull adds it to the file)`);
     }
     // Checked while planning, so apply fails before any part is written.
     if (sub === 'apply') {

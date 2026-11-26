@@ -2,6 +2,17 @@
 
 Every published release, newest first. Dates are the day the version was cut.
 
+## 0.29.0 (2026-11-25)
+
+- Added: `site tenants list|get|create|update|delete|import`. `import` sends a JSON list 100 at a time and can be run again to resume; `delete` needs `--yes` or `--dry-run`.
+- Added: `site move --to <host>` moves a site to a new domain in one call; `health --pre-deploy`.
+- Changed: `plan` lists a connection the file leaves out (one `executors connect` made) as managed, and never as a change. It warns when a site's config is still the default. A refusal prints its fix hint and `didYouMean`.
+
+## 0.28.0 (2026-11-25)
+
+- Added: `apply --yes` / `-y` skips the confirmation; `csp --no-hashes` leaves inline-script hashes out (with a warning about what that allows), and a missing vendor manifest fails loudly. `csp --merge` knows lucida and seolyticize.
+- Fixed: cookie rows in a category the same file's config adds are checked after the config part, in `plan` and `apply`. A bare JSON array is read as `{"cookies": [...]}`.
+
 ## 0.27.6 (2026-11-18)
 
 - Added: `init` writes `"$schema": "https://cookiemunch.net/schemas/cookiemunch-v1.json"`, so editors autocomplete and check the file.

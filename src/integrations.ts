@@ -11,16 +11,105 @@ import type { CliIo } from './cli.js';
 interface Helpers {
   requireSite(): string;
   site(): string | undefined;
-  readJson(path: string | undefined): Promise<Record<string, unknown>>;
+  readJson(path: string | undefined, arrayKey?: string): Promise<Record<string, unknown>>;
   usage(msg: string): Error;
   flag(name: string): string | true | undefined;
 }
 
 const out = (io: CliIo, v: unknown) => io.stdout(`${JSON.stringify(v, null, 2)}\n`);
 
+const TENANTS_USAGE = 'usage: cookiemunch site tenants list|get|create|update|delete|import --site <parent cbid> [--external-id <id>] …';
+
+/** `cookiemunch site tenants <action> --site <parent>` (LinkHub CM-L3, Sellstream CM-I4). */
+async function tenantsCommand(action: string | undefined, io: CliIo, client: CookieMunchClient, h: Helpers): Promise<number> {
+  const parent = h.requireSite();
+  const str = (n: string) => (typeof h.flag(n) === 'string' ? (h.flag(n) as string) : undefined);
+  const dryRun = h.flag('dry-run') === true;
+  const id = () => str('external-id') ?? (() => { throw h.usage(`${TENANTS_USAGE}
+--external-id is required for ${action}`); })();
+  const controller = str('controller-name') ? { name: str('controller-name')!, ...(str('controller-email') ? { email: str('controller-email')! } : {}) } : undefined;
+  switch (action) {
+    case 'list': {
+      const limit = str('limit');
+      const page = await client.tenants.list(parent, { ...(limit ? { limit: Number(limit) } : {}), ...(str('cursor') ? { cursor: str('cursor')! } : {}) });
+      if (h.flag('json') === true) out(io, page);
+      else {
+        for (const t of page.tenants) io.stdout(`${t.externalId}\t${t.tenantCbid}\t${t.path ?? t.domain}\t${t.name ?? ''}\n`);
+        io.stderr(`${page.tenants.length} of ${page.total}${page.nextCursor ? `; next page: --cursor ${page.nextCursor}` : ''}\n`);
+      }
+      return 0;
+    }
+    case 'get':
+      out(io, await client.tenants.get(parent, id()));
+      return 0;
+    case 'create': {
+      const path = str('path');
+      const domain = str('domain');
+      if (!path === !domain) throw h.usage('create takes --path </handle> or --domain <host>');
+      const t = await client.tenants.create(parent, {
+        externalId: id(), ...(str('name') ? { name: str('name')! } : {}), ...(path ? { path } : { domains: [domain!] }), ...(controller ? { controller } : {}),
+      }, { dryRun });
+      out(io, t);
+      if (!dryRun) io.stderr(`Put this on the customer's pages: <script id="CookieMunch" src="https://cdn.cookiemunch.net/consent.js" ${Object.entries(t.snippetAttributes ?? {}).map(([k, v]) => `${k}="${v}"`).join(' ')}></script>\n`);
+      return 0;
+    }
+    case 'update': {
+      const patch = { ...(str('name') ? { name: str('name')! } : {}), ...(str('path') ? { path: str('path')! } : {}), ...(controller ? { controller } : {}) };
+      if (!Object.keys(patch).length) throw h.usage('nothing to change: give --name, --path or --controller-name');
+      out(io, await client.tenants.update(parent, id(), patch, { dryRun }));
+      return 0;
+    }
+    case 'delete': {
+      const externalId = id();
+      if (!dryRun && h.flag('yes') !== true) throw h.usage(`delete removes ${externalId}'s site and everything it holds (consent ledger, rights page): add --yes, or --dry-run to see it first`);
+      const r = await client.tenants.delete(parent, externalId, { dryRun });
+      if (r) out(io, r);
+      else io.stderr(`deleted ${externalId}\n`);
+      return 0;
+    }
+    case 'import': {
+      const list = (await h.readJson(str('file'), 'tenants')).tenants;
+      if (!Array.isArray(list) || !list.length) throw h.usage('import --file <tenants.json>: a JSON list of tenants, or {"tenants": [...]}');
+      let failed = 0;
+      for (let i = 0; i < list.length; i += 100) {
+        const r = await client.tenants.createBulk(parent, list.slice(i, i + 100) as never, { dryRun });
+        for (const [j, x] of r.results.entries()) {
+          if (!x.ok) failed++;
+          io.stdout(`${x.ok ? (dryRun ? '~' : x.existing ? '=' : '✓') : '✗'} ${String((list[i + j] as { externalId?: unknown })?.externalId ?? x.externalId)}${x.ok ? ` ${x.tenantCbid ?? ''}` : ` (${x.status}) ${x.error ?? ''}`}\n`);
+        }
+      }
+      io.stderr(`${list.length - failed} of ${list.length} ${dryRun ? 'would be created' : 'created or already there'}${failed ? `; ${failed} refused: fix them and run the same file again` : ''}.\n`);
+      return failed ? 1 : 0;
+    }
+    default:
+      throw h.usage(TENANTS_USAGE);
+  }
+}
+
 /** `cookiemunch site update --site <cbid> [--domain d [--keep-old-domain]] [--name n | --clear-name] [--aliases a,b] [--dry-run]` */
 export async function siteCommand(sub: string | undefined, io: CliIo, client: CookieMunchClient, h: Helpers, file?: string): Promise<number> {
   if (sub === 'brand') return brandCommand(io, client, h, file);
+  if (sub === 'tenants') return tenantsCommand(file, io, client, h);
+  // `site move --site <cbid> --to <host> [--from <host>] [--drop-old] [--trust-old-days n] [--dry-run]` (LinkHub CM-X3).
+  if (sub === 'move') {
+    const cbid = h.requireSite();
+    const to = h.flag('to');
+    if (typeof to !== 'string') throw h.usage('usage: cookiemunch site move --site <cbid> --to <host> [--from <host>] [--drop-old] [--trust-old-days <n>] [--dry-run]');
+    const from = h.flag('from');
+    const days = h.flag('trust-old-days');
+    const r = await client.sites.move(cbid, {
+      to, ...(typeof from === 'string' ? { from } : {}), ...(h.flag('drop-old') === true ? { keepOld: false } : {}),
+      ...(typeof days === 'string' ? { trustOldDays: Number(days) } : {}),
+    }, { dryRun: h.flag('dry-run') === true });
+    if (h.flag('json') === true) out(io, r);
+    else {
+      for (const c of r.changes) io.stdout(`${r.dryRun ? '~' : '✓'} ${c.resource}${c.id ? ` ${c.id}` : ''} ${c.field}: ${JSON.stringify(c.before)} → ${JSON.stringify(c.after)}\n`);
+      for (const st of r.steps) if (st.status >= 300) io.stdout(`refused ${st.resource}${st.id ? ` ${st.id}` : ''} (${st.status}): ${JSON.stringify(st.error)}\n`);
+      for (const n of r.notChanged ?? []) io.stdout(`not moved ${n.resource} ${n.value}: ${n.reason}\n`);
+      io.stderr(r.changes.length ? `${r.changes.length} field(s) ${r.dryRun ? 'would move' : r.ok ? 'moved' : 'planned; the move stopped at a refusal: fix it and run again'}.\n` : `nothing names ${r.from}.\n`);
+    }
+    return r.ok ? 0 : 1;
+  }
   if (sub !== 'update') throw h.usage('usage: cookiemunch site update --site <cbid> [--domain <host> [--keep-old-domain]] [--name <name>] [--aliases a,b] [--dry-run]');
   const cbid = h.requireSite();
   const domain = h.flag('domain');
@@ -63,17 +152,19 @@ export async function healthCommand(io: CliIo, client: CookieMunchClient, h: Hel
   // --fail-on error | warning (default) | never: which failing severity makes the exit code 1, for CI.
   const failOn = h.flag('fail-on') ?? 'warning';
   if (failOn !== 'error' && failOn !== 'warning' && failOn !== 'never') throw h.usage('--fail-on must be error, warning or never');
-  const r = await client.integrationHealth(h.site());
+  const pre = h.flag('pre-deploy') === true;
+  const r = await client.integrationHealth(h.site(), pre ? { preDeploy: true } : undefined);
   if (h.flag('json') === true) out(io, r);
   else {
     for (const c of r.checks) {
-      const mark = c.waived ? 'WAIV' : c.ok === true ? 'ok  ' : c.ok === false ? (c.severity === 'error' ? 'FAIL' : 'WARN') : '--  ';
+      const mark = c.waived ? 'WAIV' : c.expectedBeforeGoLive ? 'PRE ' : c.ok === true ? 'ok  ' : c.ok === false ? (c.severity === 'error' ? 'FAIL' : 'WARN') : '--  ';
       const net = c.hop ? ` (${c.hop}${c.status !== undefined ? ` ${c.status}` : ''}${c.elapsedMs !== undefined ? `, ${c.elapsedMs} ms` : ''})` : '';
-      io.stdout(`${mark} ${c.check} — ${c.subject}${c.detail ? `: ${c.detail}` : ''}${net}${c.waived ? ` — waived: ${c.waived.reason}` : ''}\n`);
+      io.stdout(`${mark} ${c.check} — ${c.subject}${c.detail ? `: ${c.detail}` : ''}${net}${c.waived ? ` — waived: ${c.waived.reason}` : ''}${c.expectedBeforeGoLive ? ' — expected until the tag is live' : ''}\n`);
       const fix = c.fix ?? c.fixHint;
       if (c.ok === false && fix) io.stdout(`     fix: ${fix}\n`);
     }
     io.stdout(`${r.counts.error} error(s), ${r.counts.warning} warning(s), ${r.counts.notChecked} not checked${r.counts.waived ? `, ${r.counts.waived} waived` : ''}\n`);
+    if (r.okMeaning) io.stdout(`ok means ${r.okMeaning === 'no_errors' ? 'no failing errors (warnings allowed); clean means none of either' : 'no failing errors or warnings'}\n`);
   }
   if (failOn === 'never') return 0;
   const failing = r.checks.filter((c) => c.ok === false && (c.severity === 'error' || (failOn === 'warning' && c.severity === 'warning')));

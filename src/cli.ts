@@ -206,6 +206,17 @@ Usage:
                           [--aliases <a,b>] [--dry-run]
       Rename or move a site. The cbid and consent ledger stay; a domain move clears
       verification. --dry-run prints the diff and its effects without saving.
+  cookiemunch site move --site <cbid> --to <host> [--from <host>] [--drop-old] [--trust-old-days <n>] [--dry-run]
+      Move a site to a new domain in one call: the domain (old one kept as an alias unless
+      --drop-old), config URLs, its sign-in provider (old issuer trusted --trust-old-days, default 14)
+      and connected systems on the old host. Run again after a refusal: what moved is skipped.
+  cookiemunch site tenants list|get|create|update|delete|import --site <parent cbid> [--external-id <id>]
+                           [--path </handle> | --domain <host>] [--name <name>] [--controller-name <name>]
+                           [--controller-email <email>] [--file <tenants.json>] [--limit <n>] [--cursor <c>] [--dry-run] [--yes]
+      Sites for your own customers (a creator, a shop), each the controller for its own visitors.
+      create is idempotent by --external-id; import reads a JSON list of tenants (or {"tenants": [...]})
+      and sends it 100 at a time, so running it again resumes. delete removes the tenant's site and
+      everything it holds: it needs --yes (or --dry-run).
   cookiemunch site brand --site <cbid> [--url <https URL> | <brand.json>] [--dry-run]
       Import a brand.json into the banner theme (the rights page uses it too). Values the
       site set itself are kept. With neither --url nor a file, prints the last import.
@@ -221,7 +232,7 @@ Usage:
       GET /api/v1/<cbid>/profile with curl.
   cookiemunch whoami
       The key you hold (GET /v1/me): its organisation, scopes, and whether it is locked to some sites.
-  cookiemunch health [--site <cbid>] [--json] [--fail-on error|warning|never]
+  cookiemunch health [--site <cbid>] [--json] [--fail-on error|warning|never] [--pre-deploy]
       Every link the site's privacy wiring depends on, with a fix hint for each that
       fails. Exits 1 when a check fails (checks that could not run, or are waived, do not count).
       --fail-on error ignores warnings; --fail-on never always exits 0.
@@ -362,7 +373,7 @@ interface Parsed {
   flags: Record<string, string | true>;
 }
 
-export const BOOLEAN_FLAGS = new Set(['keep-old-domain', 'replace', 'exit-code', 'open', 'help', 'json', 'yes', 'strict', 'wait', 'canary', 'dry-run', 'clear-name', 'revoke-atlas-id-grant', 'with-cbid', 'without-cbid', 'cleanup', 'verify', 'detail', 'presets-only', 'defer', 'fix-plan', 'no-verify', 'no-hashes']);
+export const BOOLEAN_FLAGS = new Set(['keep-old-domain', 'replace', 'exit-code', 'open', 'help', 'json', 'yes', 'strict', 'wait', 'canary', 'dry-run', 'clear-name', 'revoke-atlas-id-grant', 'with-cbid', 'without-cbid', 'cleanup', 'verify', 'detail', 'presets-only', 'defer', 'fix-plan', 'no-verify', 'no-hashes', 'pre-deploy', 'drop-old']);
 
 /** Every flag the help names. An unknown flag that is ignored is a setting someone believes they made. */
 const KNOWN_FLAGS = new Set([...USAGE.matchAll(/--([a-z][a-z-]*)/g)].map((m) => m[1]!));
@@ -397,7 +408,7 @@ export function flagNotTaken(positional: string[], flags: Record<string, unknown
 
 /** How many words a command takes after its name. Anything not listed takes none. */
 const POSITIONALS: Record<string, number> = Object.fromEntries([
-  'config diff', 'config push', 'config validate', 'rights-page diff', 'rights-page push', 'site brand', 'provision', 'plan', 'apply', 'scan-source', 'sandbox',
+  'config diff', 'config push', 'config validate', 'rights-page diff', 'rights-page push', 'site brand', 'site tenants', 'provision', 'plan', 'apply', 'scan-source', 'sandbox',
   'cookies diff', 'cookies push', 'cookies preset', 'cookies unpreset', 'cookies import-manifest', 'cookies delete-observed', 'cookies translation',
   'executors pull', 'executors diff', 'executors push', 'executors test', 'executors webhook-test', 'executors deliveries', 'executors conformance',
   'executors roll-completion-secret', 'executors upgrade-preset', 'executors recheck', 'executors health', 'executors connect', 'executors activate',
@@ -472,7 +483,8 @@ async function readText(io: CliIo, path: string): Promise<string> {
   }
 }
 
-async function readConfigFile(io: CliIo, path: string | undefined): Promise<Record<string, unknown>> {
+/** `arrayKey`: a file holding a bare JSON list reads as `{ [arrayKey]: list }`. */
+async function readConfigFile(io: CliIo, path: string | undefined, arrayKey?: string): Promise<Record<string, unknown>> {
   if (!path) throw new UsageError('a config file is required');
   const text = await readText(io, path);
   let parsed: unknown;
@@ -481,6 +493,7 @@ async function readConfigFile(io: CliIo, path: string | undefined): Promise<Reco
   } catch (e) {
     throw new UsageError(`${path} is not valid JSON: ${(e as Error).message}`, false);
   }
+  if (arrayKey && Array.isArray(parsed)) return { [arrayKey]: parsed };
   if (!isPlainObject(parsed)) throw new UsageError(`${path} must hold a JSON object`, false);
   return parsed;
 }
@@ -491,7 +504,7 @@ function proposed(current: Record<string, unknown>, file: Record<string, unknown
 }
 
 /** This package's version, sent in the default User-Agent (a test pins it to package.json). */
-export const CLI_VERSION = '0.28.0';
+export const CLI_VERSION = '0.29.0';
 
 /** `COOKIEMUNCH_USER_AGENT`, else `cookiemunch-cli/<version>`. */
 function userAgent(io: CliIo): string {
@@ -1246,7 +1259,7 @@ export async function run(argv: string[], io: CliIo): Promise<number> {
     const helpers = {
       requireSite: () => requireSite(p, io),
       site: () => str(p.flags, 'site') ?? io.env.COOKIEMUNCH_SITE,
-      readJson: (path: string | undefined) => readConfigFile(io, path),
+      readJson: (path: string | undefined, arrayKey?: string) => readConfigFile(io, path, arrayKey),
       usage: helperUsage,
       flag: (name: string) => p.flags[name],
     };
@@ -1271,6 +1284,11 @@ export async function run(argv: string[], io: CliIo): Promise<number> {
     }
     if (e instanceof CookieMunchApiError) {
       io.stderr(`API error ${e.status}${e.code ? ` (${e.code})` : ''}: ${e.message}\n`);
+      // The server's way out, when it gives one (Sellstream CM-B4, CM-I3).
+      const b = (e.body ?? {}) as { fix?: unknown; didYouMean?: unknown; widen?: { call?: unknown; body?: unknown; with?: unknown } };
+      if (typeof b.didYouMean === 'string') io.stderr(`  did you mean: ${b.didYouMean}\n`);
+      if (typeof b.fix === 'string') io.stderr(`  fix: ${b.fix}\n`);
+      if (b.widen && typeof b.widen.call === 'string') io.stderr(`  widen this key: ${b.widen.call} ${JSON.stringify(b.widen.body)}${typeof b.widen.with === 'string' ? ` (with ${b.widen.with})` : ''}\n`);
       return 1;
     }
     io.stderr(`${(e as Error).message ?? String(e)}\n`);

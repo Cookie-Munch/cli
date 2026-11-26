@@ -160,6 +160,20 @@ describe('plan|apply cookiemunch.json (CMU-D12)', () => {
     expect(h.calls.filter((c) => c.method !== 'GET' && !c.url.includes('dryRun')).length).toBe(0);
   });
 
+  it('plan names a connection connect made, which the file leaves out, as managed, and still says No changes (CM-X2)', async () => {
+    const f = JSON.stringify({ site: { cbid: 'acme' }, executors: [{ system: 'shop', baseUrl: 'https://shop.example', cbid: 'acme' }] });
+    const live = [
+      { id: 'e1', system: 'shop', baseUrl: 'https://shop.example', cbid: 'acme' },
+      { id: 'e2', system: 'identity', baseUrl: 'https://acme.atlasauth.net', cbid: 'acme', preset: 'atlas', mint: { partner: 'atlas' } },
+      { id: 'e3', system: 'other-site', baseUrl: 'https://x.example', cbid: 'not-acme' },
+    ];
+    const h = harness({ files: { 'f.json': f }, respond: (c) => (c.url.endsWith('/v1/dsar/executors') && c.method === 'GET' ? { status: 200, body: live } : respond(c)) });
+    expect(await run(['plan', 'f.json', '--exit-code'], h.io)).toBe(0);
+    expect(h.out()).toContain('executors: No changes');
+    expect(h.out()).toContain('= identity: managed by atlas connect; left as it is');
+    expect(h.out()).not.toContain('other-site');
+  });
+
   it('plan reports a config field the server\'s dry run does not keep, instead of No changes', async () => {
     const b = JSON.stringify({ site: { cbid: 'acme' }, config: { consent: { identifyIssuers: [{ issuer: 'https://forumulate.com', jwksUrl: 'https://forumulate.com/k' }] } } });
     const h = harness({ files: { 'b.json': b }, respond: (c) => (c.url.includes('/config') ? { status: 200, body: { dryRun: true, diff: [], config: { cbid: 'acme', consent: { version: 1 } } } } : respond(c)) });

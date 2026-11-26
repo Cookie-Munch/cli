@@ -20,6 +20,40 @@ describe('cookiemunch site update', () => {
   });
 });
 
+describe('cookiemunch site tenants (LinkHub CM-L3)', () => {
+  const T = { tenantCbid: 'dv-t1', cbid: 'dv-t1', parent: 'lh', externalId: 'user_1', path: '/ana', domain: 'linkhub.xyz', verified: true, rightsPageUrl: 'https://cookiemunch.net/r/dv-t1', snippetAttributes: { 'data-cbid': 'dv-t1', 'data-scope-path': '/ana' } };
+  it('create sends path and controller and prints the tag; a create needs --path or --domain', async () => {
+    const h = harness({ respond: (c) => (c.method === 'POST' ? { status: 201, body: T } : undefined) });
+    expect(await run(['site', 'tenants', 'create', '--site', 'lh', '--external-id', 'user_1', '--path', '/ana', '--controller-name', 'Ana Ltd'], h.io)).toBe(0);
+    expect(h.calls[0]).toMatchObject({ method: 'POST', url: 'https://api.test/v1/sites/lh/tenants', body: { externalId: 'user_1', path: '/ana', controller: { name: 'Ana Ltd' } } });
+    expect(h.err()).toMatch(/data-scope-path="\/ana"/);
+    expect(await run(['site', 'tenants', 'create', '--site', 'lh', '--external-id', 'user_1'], h.io)).toBe(2);
+  });
+  it('delete needs --yes or --dry-run', async () => {
+    const h = harness({ respond: (c) => (c.method === 'DELETE' ? { status: 200, body: { dryRun: true, wouldDelete: T } } : undefined) });
+    expect(await run(['site', 'tenants', 'delete', '--site', 'lh', '--external-id', 'user_1'], h.io)).toBe(2);
+    expect(h.calls).toHaveLength(0);
+    expect(await run(['site', 'tenants', 'delete', '--site', 'lh', '--external-id', 'user_1', '--dry-run'], h.io)).toBe(0);
+    expect(h.calls[0]).toMatchObject({ method: 'DELETE', url: 'https://api.test/v1/sites/lh/tenants/user_1?dryRun=1' });
+  });
+  it('import sends 100 at a time and exits 1 when one is refused', async () => {
+    const tenants = Array.from({ length: 150 }, (_, i) => ({ externalId: `u${i}`, path: `/u${i}` }));
+    const h = harness({
+      files: { 't.json': JSON.stringify(tenants) },
+      respond: (c) => {
+        if (!c.url.endsWith('/tenants/bulk')) return undefined;
+        const items = (c.body as { tenants: Array<{ externalId: string }> }).tenants;
+        return { status: 200, body: { results: items.map((t) => (t.externalId === 'u120' ? { ok: false, status: 409, error: 'path taken' } : { ok: true, status: 201, tenantCbid: `dv-${t.externalId}` })) } };
+      },
+    });
+    const code = await run(['site', 'tenants', 'import', '--site', 'lh', '--file', 't.json'], h.io);
+    expect(code, h.err()).toBe(1);
+    expect(h.calls.map((c) => (c.body as { tenants: unknown[] }).tenants.length)).toEqual([100, 50]);
+    expect(h.out()).toMatch(/✗ u120 \(409\) path taken/);
+    expect(h.err()).toMatch(/149 of 150 .*1 refused/);
+  });
+});
+
 describe('cookiemunch site brand (CMU-X44)', () => {
   const RB = { cbid: 'acme', source: { type: 'body' }, importedAt: 1, precedence: 'p', mapping: [], ignored: [], warnings: [{ role: 'font.body.url', code: 'third_party_font_host', message: 'served from fonts.googleapis.com' }] };
   it('--url imports by URL, a file imports its document, neither prints the last import', async () => {
